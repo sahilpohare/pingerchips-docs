@@ -9,7 +9,9 @@ We will be using [Pusher JS](https://github.com/pusher/pusher-js?_gl=1*wjq8zd*_g
 
 ## Installation
 
-:: Note: You can skip this step if you already have the Pusher JS SDK installed in your project
+:::note
+
+You can skip this step if you already have the Pusher JS SDK installed in your project
 
 ```bash
 npm install pusher-js
