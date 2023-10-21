@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkpingerchips=self.webpackChunkpingerchips||[]).push([[934],{3463:s=>{s.exports=JSON.parse('{"label":"facebook","permalink":"/pcing-docs/blog/tags/facebook","allTagsPath":"/pcing-docs/blog/tags","count":1}')}}]);
