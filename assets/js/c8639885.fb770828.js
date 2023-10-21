@@ -1,1 +1,0 @@
-"use strict";(self.webpackChunkpingerchips=self.webpackChunkpingerchips||[]).push([[542],{6669:e=>{e.exports=JSON.parse('{"permalink":"/pcing-docs/blog/tags/hola","page":1,"postsPerPage":10,"totalPages":1,"totalCount":1,"blogDescription":"Blog","blogTitle":"Blog"}')}}]);
