@@ -14,7 +14,7 @@ const config = {
   url: 'https://your-docusaurus-test-site.com',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: '/pingerchips-docs',
+  baseUrl: '/',
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
@@ -55,6 +55,11 @@ const config = {
           customCss: require.resolve('./src/css/custom.css'),
         },
       }),
+      {
+        googleTagManager: {
+          containerId: 'GTM-12345'
+        }
+      }
     ],
   ],
 

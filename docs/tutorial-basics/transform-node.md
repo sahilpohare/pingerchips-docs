@@ -21,7 +21,7 @@ The transform node is a node that allows you to transform the data that is being
 ```js
 export default function transformer(message) {
     return {
-        ...data,
+        ...message,
         newKey: "newValue",
     };
 }
