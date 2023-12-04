@@ -20,9 +20,9 @@ npm install pusher-js
 ## Usage
 
 ```js
-import Pusher from "pusher-js";
+import Pingerchips from "pingerchips-js";
 
-let pusher = new PusherJS(<APP KEY>, {
+let pingerchips = new Pingerchips(<APP KEY>, {
     wsHost: "ws.pingerchips.com",
     wsPort: 6001,
     forceTLS: false,
@@ -32,7 +32,7 @@ let pusher = new PusherJS(<APP KEY>, {
     cluster: "mt1",
 });
 
-let channel = pusher.subscribe("my-channel");
+let channel = pingerchips.subscribe("my-channel");
 channel.bind("my-event", function (data) {
     alert("Received my-event with message: " + data.message);
 });
