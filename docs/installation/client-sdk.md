@@ -2,38 +2,91 @@
 sidebar_position: 2
 ---
 
-# Client SDK Setup
+# Client SDK Installation
 
-You can use any [Pusher Client SDK](https://pusher.com/docs/channels/channels_libraries/libraries/) to connect to Pingerchips.
-We will be using [Pusher JS](https://github.com/pusher/pusher-js?_gl=1*wjq8zd*_gcl_au*MTY2MTcxMTY3NC4xNjk1NzU0NTUz) for this example.
+Install the Pingerchips Client SDK or use the Pusher-compatible SDK.
 
-## Installation
+## Option 1: Pingerchips Client SDK (Recommended)
 
-:::note
+```bash
+npm install pingerchips-js
+```
 
-You can skip this step if you already have the Pusher JS SDK installed in your project
+### Usage
+
+```javascript
+import Pingerchips from 'pingerchips-js';
+
+const client = new Pingerchips('YOUR_APP_KEY', {
+  endpoint: 'wss://pinger-processor.pingerchips.com/socket'
+});
+
+const channel = await client.subscribe('my-channel');
+
+channel.bind('my-event', (data) => {
+  console.log('Received:', data);
+});
+```
+
+**Benefits:**
+- Built specifically for Pingerchips
+- Supports public, private, and presence channels
+- Built on Phoenix Channels for reliability
+- Modern async/await support
+
+See the [Client SDK Guide](/docs/sdk/client-sdk) for complete documentation.
+
+## Option 2: Pusher JS SDK (Compatible)
+
+You can use any [Pusher Client SDK](https://pusher.com/docs/channels/channels_libraries/libraries/) with Pingerchips.
 
 ```bash
 npm install pusher-js
 ```
 
-## Usage
+### Usage
 
-```js
-import Pingerchips from "pingerchips-js";
+```javascript
+import Pusher from 'pusher-js';
 
-let pingerchips = new Pingerchips(<APP KEY>, {
-    wsHost: "ws.pingerchips.com",
-    wsPort: 6001,
-    forceTLS: false,
-    encrypted: true,
-    disableStats: true,
-    enabledTransports: ["ws", "wss"],
-    cluster: "mt1",
+const pusher = new Pusher('YOUR_APP_KEY', {
+  wsHost: 'pinger-processor.pingerchips.com',
+  wsPort: 443,
+  forceTLS: true,
+  encrypted: true,
+  disableStats: true,
+  enabledTransports: ['ws', 'wss']
 });
 
-let channel = pingerchips.subscribe("my-channel");
-channel.bind("my-event", function (data) {
-    alert("Received my-event with message: " + data.message);
+const channel = pusher.subscribe('my-channel');
+channel.bind('my-event', (data) => {
+  alert('Received: ' + data.message);
 });
 ```
+
+## CDN Installation
+
+For quick prototyping, you can use the CDN:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/phoenix@1.7.0/priv/static/phoenix.min.js"></script>
+<script src="https://unpkg.com/pingerchips-js@latest/index.js"></script>
+
+<script>
+  const client = new Pingerchips('YOUR_APP_KEY', {
+    endpoint: 'wss://pinger-processor.pingerchips.com/socket'
+  });
+
+  client.subscribe('my-channel').then(channel => {
+    channel.bind('my-event', data => {
+      console.log('Received:', data);
+    });
+  });
+</script>
+```
+
+## Next Steps
+
+- Read the full [Client SDK documentation](/docs/sdk/client-sdk)
+- Learn about [channel types](/docs/sdk/channels)
+- Build a [real-time chat application](/docs/getting-started#complete-example)
