@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkpingerchips=self.webpackChunkpingerchips||[]).push([[2981],{953:s=>{s.exports=JSON.parse('{"label":"hello","permalink":"/pingerchips-docs/blog/tags/hello","allTagsPath":"/pingerchips-docs/blog/tags","count":2}')}}]);
