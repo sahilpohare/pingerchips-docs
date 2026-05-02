@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Server SDK (Node.js)
 
-The Pingerchips Server SDK allows you to trigger events from your Node.js backend and authenticate users for private and presence channels.
+`pingerchips-js-server` triggers events from your backend and generates auth signatures for private and presence channels.
 
 ## Installation
 
@@ -12,415 +12,257 @@ The Pingerchips Server SDK allows you to trigger events from your Node.js backen
 npm install pingerchips-js-server
 ```
 
-## Quick Start
+Requires Node.js ≥ 14. ESM only (`"type": "module"` or `.mjs`).
+
+## Initialization
 
 ```javascript
 import PingerchipsServer from 'pingerchips-js-server';
 
-const pingerchips = new PingerchipsServer('APP_ID', 'APP_SECRET', {
-  appKey: 'APP_KEY',
-  endpoint: 'https://pinger-processor.pingerchips.com/api',
-  token: 'YOUR_API_TOKEN'
-});
-
-// Trigger an event
-await pingerchips.trigger('lobby', 'message', {
-  text: 'Hello from server!',
-  timestamp: Date.now()
-});
+const pingerchips = new PingerchipsServer(appKey, appSecret, options);
 ```
 
-## Configuration
-
-### Constructor Options
+### Constructor
 
 ```javascript
-new PingerchipsServer(appId, appSecret, options)
+new PingerchipsServer(appKey, appSecret, options)
 ```
 
-| Parameter | Type | Description | Required |
-|-----------|------|-------------|----------|
-| `appId` | string | Your application ID from the dashboard | Yes |
-| `appSecret` | string | Your application secret from the dashboard | Yes |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `appKey` | string | Your App Key from the dashboard |
+| `appSecret` | string | Your App Secret from the dashboard |
 
-**Options:**
+### Options
 
-| Option | Type | Description | Required |
-|--------|------|-------------|----------|
-| `appKey` | string | Your app key (required for authentication) | Yes* |
-| `endpoint` | string | API endpoint URL | No |
-| `token` | string | API token for authentication | Yes |
-| `mtls` | object | mTLS configuration for secure connections | No |
-
-\* Required if you plan to use authentication for private/presence channels
-
-### Example Configuration
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `endpoint` | string | `https://queue.pingerchips.com` | API base URL |
+| `requestTimeout` | number | `10000` | Request timeout in milliseconds |
+| `retries` | number | `2` | Retry count on 5xx or network errors |
+| `mtls` | object | — | mTLS config (see below) |
 
 ```javascript
 const pingerchips = new PingerchipsServer(
-  'your-app-id',
-  'your-app-secret',
+  process.env.PINGERCHIPS_APP_KEY,
+  process.env.PINGERCHIPS_APP_SECRET,
   {
-    appKey: 'your-app-key',
-    endpoint: 'https://pinger-processor.pingerchips.com/api',
-    token: 'your-api-token'
+    endpoint: 'https://queue.pingerchips.com',
+    requestTimeout: 5000,
+    retries: 3,
   }
 );
 ```
 
+---
+
 ## Triggering Events
 
-Send events to channels from your backend:
-
-### Basic Usage
-
 ```javascript
-await pingerchips.trigger('channel-name', 'event-name', {
-  message: 'Hello World',
-  timestamp: Date.now()
-});
+await pingerchips.trigger(channel, event, data);
 ```
 
-### Real-World Examples
+| Parameter | Type | Constraints |
+|-----------|------|-------------|
+| `channel` | string | Max 200 characters |
+| `event` | string | Max 200 characters |
+| `data` | any | JSON-serializable, max 64 KB |
 
-**Broadcast a notification:**
+Throws a `TypeError` for invalid inputs before making any network request. Throws an `Error` on non-2xx responses.
+
+### Examples
 
 ```javascript
-await pingerchips.trigger('announcements', 'new-announcement', {
-  title: 'System Maintenance',
-  message: 'Scheduled maintenance at 2 AM UTC',
-  severity: 'info'
+// Public channel broadcast
+await pingerchips.trigger('announcements', 'new-post', {
+  title: 'v2 Released',
+  url: '/blog/v2',
 });
-```
 
-**Send to a private user channel:**
-
-```javascript
+// Private user channel
 await pingerchips.trigger(`private-user-${userId}`, 'notification', {
-  type: 'order-update',
+  type: 'order-shipped',
   orderId: '12345',
-  status: 'shipped'
+});
+
+// Presence channel update
+await pingerchips.trigger('presence-game-room', 'game-state', {
+  round: 3,
+  timeRemaining: 45,
 });
 ```
 
-**Update presence channel:**
+### How It Works
 
-```javascript
-await pingerchips.trigger('presence-game-room', 'game-state-update', {
-  players: activePlayersCount,
-  currentRound: 3,
-  timeRemaining: 45
-});
+`trigger` signs the request with HMAC-SHA256 using your App Secret and sends it to:
+
+```
+POST /api/apps/{appKey}/trigger
 ```
 
-## Authentication
+See [HMAC Request Signing](/docs/hmac-signing) for the full algorithm if you need to sign requests manually.
 
-Authenticate users for private and presence channels by implementing an auth endpoint.
+---
 
-### Setting Up an Auth Endpoint
+## Authentication {#authentication}
 
-Create an endpoint on your server that clients will call to authenticate:
-
-```javascript
-import express from 'express';
-import PingerchipsServer from 'pingerchips-js-server';
-
-const app = express();
-app.use(express.json());
-
-const pingerchips = new PingerchipsServer('app_id', 'app_secret', {
-  appKey: 'app_key'
-});
-
-app.post('/auth', (req, res) => {
-  const { socket_id, channel_name, auth_info } = req.body;
-
-  // 1. Validate the user (check session, JWT, etc.)
-  const user = validateUserSession(req, auth_info);
-
-  if (!user) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-
-  // 2. Check if user has access to this channel
-  if (channel_name.startsWith('private-user-')) {
-    const requestedUserId = channel_name.replace('private-user-', '');
-    if (user.id !== requestedUserId) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-  }
-
-  // 3. For presence channels, provide user data
-  let userData = null;
-  if (channel_name.startsWith('presence-')) {
-    userData = {
-      user_id: user.id,
-      user_info: {
-        name: user.name,
-        avatar: user.avatar,
-        status: user.status
-      }
-    };
-  }
-
-  // 4. Generate auth signature
-  const authData = pingerchips.authenticate(socket_id, channel_name, userData);
-
-  res.json(authData);
-});
-
-app.listen(3000);
-```
-
-### Authentication Method
+Generate auth payloads for clients joining private or presence channels. Call this from your server's auth endpoint.
 
 ```javascript
 pingerchips.authenticate(socketId, channelName, userData)
 ```
 
-**Parameters:**
-
-| Parameter | Type | Description | Required |
-|-----------|------|-------------|----------|
-| `socketId` | string | Socket ID from the client | Yes |
-| `channelName` | string | Channel name (e.g., "private-chat") | Yes |
-| `userData` | object | User data for presence channels | No* |
-
-\* Required for presence channels
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `socketId` | string | Yes | Socket ID from the client (`client.getSocketId()`) |
+| `channelName` | string | Yes | Must start with `private-` or `presence-` |
+| `userData` | object | Presence only | Must include `user_id`. Can include any extra fields |
 
 **Returns:**
 
 ```javascript
-{
-  auth: "app_key:hmac_signature",
-  channel_data: "{\"user_id\":\"123\",...}" // Only for presence channels
-}
+// Private channel
+{ auth: "appKey:hmac_signature" }
+
+// Presence channel
+{ auth: "appKey:hmac_signature", channel_data: "{\"user_id\":\"...\",...}" }
+
+// Private channel with optional user_data
+{ auth: "appKey:hmac_signature", user_data: "{...}" }
 ```
 
-### Private Channel Example
-
-```javascript
-app.post('/auth', (req, res) => {
-  const { socket_id, channel_name } = req.body;
-
-  const user = getUserFromSession(req);
-  if (!user) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-
-  // No userData needed for private channels
-  const authData = pingerchips.authenticate(socket_id, channel_name);
-  res.json(authData);
-});
-```
-
-### Presence Channel Example
-
-```javascript
-app.post('/auth', (req, res) => {
-  const { socket_id, channel_name } = req.body;
-
-  const user = getUserFromSession(req);
-  if (!user) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-
-  // Provide user data for presence
-  const userData = {
-    user_id: user.id,
-    user_info: {
-      name: user.name,
-      avatar: user.avatar_url,
-      online_status: 'active'
-    }
-  };
-
-  const authData = pingerchips.authenticate(socket_id, channel_name, userData);
-  res.json(authData);
-});
-```
-
-## mTLS Support
-
-For production deployments requiring mutual TLS authentication:
-
-```javascript
-import fs from 'fs';
-
-const pingerchips = new PingerchipsServer('app_id', 'app_secret', {
-  endpoint: 'https://pinger-processor.pingerchips.com/api',
-  token: 'your-api-token',
-  mtls: {
-    enabled: true,
-    cert: '/path/to/client-cert.pem',
-    key: '/path/to/client-key.pem',
-    ca: '/path/to/ca-cert.pem',
-    rejectUnauthorized: true
-  }
-});
-```
-
-Or pass certificate content directly:
-
-```javascript
-const pingerchips = new PingerchipsServer('app_id', 'app_secret', {
-  endpoint: 'https://pinger-processor.pingerchips.com/api',
-  mtls: {
-    enabled: true,
-    cert: fs.readFileSync('/path/to/client-cert.pem', 'utf8'),
-    key: fs.readFileSync('/path/to/client-key.pem', 'utf8'),
-    ca: fs.readFileSync('/path/to/ca-cert.pem', 'utf8')
-  }
-});
-```
-
-## Complete Examples
-
-### Express.js with Authentication
+### Setting Up an Auth Endpoint
 
 ```javascript
 import express from 'express';
-import session from 'express-session';
 import PingerchipsServer from 'pingerchips-js-server';
 
 const app = express();
 app.use(express.json());
-app.use(session({ secret: 'your-secret', resave: false, saveUninitialized: true }));
 
 const pingerchips = new PingerchipsServer(
-  process.env.PINGERCHIPS_APP_ID,
-  process.env.PINGERCHIPS_APP_SECRET,
-  {
-    appKey: process.env.PINGERCHIPS_APP_KEY,
-    endpoint: 'https://pinger-processor.pingerchips.com/api',
-    token: process.env.PINGERCHIPS_API_TOKEN
-  }
+  process.env.PINGERCHIPS_APP_KEY,
+  process.env.PINGERCHIPS_APP_SECRET
 );
 
-// Auth endpoint for private/presence channels
 app.post('/pingerchips/auth', (req, res) => {
   const { socket_id, channel_name, auth_info } = req.body;
 
-  if (!req.session.user) {
-    return res.status(403).json({ error: 'Not authenticated' });
+  // 1. Verify the user from your own session/token system
+  const user = verifyUser(auth_info.token);
+  if (!user) {
+    return res.status(403).json({ error: 'Unauthorized' });
   }
 
-  const user = req.session.user;
-
-  // Authorization logic
-  if (channel_name.startsWith('private-user-')) {
-    const userId = channel_name.replace('private-user-', '');
-    if (user.id !== userId) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
+  // 2. Authorize access to this specific channel
+  if (channel_name === `private-user-${user.id}`) {
+    // user can access their own private channel
+  } else if (channel_name.startsWith('private-')) {
+    return res.status(403).json({ error: 'Access denied' });
   }
 
-  // User data for presence channels
+  // 3. Build userData for presence channels
   let userData = null;
   if (channel_name.startsWith('presence-')) {
     userData = {
       user_id: user.id,
       user_info: {
         name: user.name,
-        email: user.email,
-        avatar: user.avatar
-      }
+        avatar: user.avatarUrl,
+      },
     };
   }
 
+  // 4. Generate the auth payload
   const authData = pingerchips.authenticate(socket_id, channel_name, userData);
   res.json(authData);
-});
-
-// Trigger events from your API routes
-app.post('/api/orders/:orderId/shipped', async (req, res) => {
-  const { orderId } = req.params;
-  const order = await getOrder(orderId);
-
-  // Notify the user
-  await pingerchips.trigger(`private-user-${order.userId}`, 'order-update', {
-    orderId,
-    status: 'shipped',
-    trackingNumber: order.trackingNumber
-  });
-
-  res.json({ success: true });
 });
 
 app.listen(3000);
 ```
 
-### Next.js API Routes
+The client SDK calls your auth endpoint automatically when subscribing to `private-*` or `presence-*` channels — you just need to set `authEndpoint` in the client constructor.
+
+### Private Channel Auth (no userData)
 
 ```javascript
-// pages/api/pingerchips/auth.js
-import PingerchipsServer from 'pingerchips-js-server';
-import { getSession } from 'next-auth/react';
+const authData = pingerchips.authenticate(socketId, 'private-chat-room');
+// { auth: "appKey:signature" }
+```
 
+### Presence Channel Auth (userData required)
+
+```javascript
+const authData = pingerchips.authenticate(socketId, 'presence-lobby', {
+  user_id: user.id,
+  user_info: { name: user.name, status: 'online' },
+});
+// { auth: "appKey:signature", channel_data: "{\"user_id\":\"...\"}" }
+```
+
+:::note
+`authenticate` throws if `channelName` does not start with `private-` or `presence-`, or if `userData` is missing `user_id` for presence channels.
+:::
+
+---
+
+## mTLS Support
+
+For deployments that require mutual TLS:
+
+```javascript
 const pingerchips = new PingerchipsServer(
-  process.env.PINGERCHIPS_APP_ID,
+  process.env.PINGERCHIPS_APP_KEY,
   process.env.PINGERCHIPS_APP_SECRET,
   {
-    appKey: process.env.PINGERCHIPS_APP_KEY,
-    endpoint: process.env.PINGERCHIPS_ENDPOINT,
-    token: process.env.PINGERCHIPS_API_TOKEN
+    endpoint: 'https://queue.pingerchips.com',
+    mtls: {
+      enabled: true,
+      cert: '/path/to/client-cert.pem',   // path or PEM string
+      key:  '/path/to/client-key.pem',
+      ca:   '/path/to/ca-cert.pem',
+      rejectUnauthorized: true,
+    },
   }
 );
+```
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+Pass PEM content directly instead of file paths if preferred:
 
-  const session = await getSession({ req });
-  if (!session) {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-
-  const { socket_id, channel_name } = req.body;
-
-  let userData = null;
-  if (channel_name.startsWith('presence-')) {
-    userData = {
-      user_id: session.user.id,
-      user_info: {
-        name: session.user.name,
-        email: session.user.email,
-        image: session.user.image
-      }
-    };
-  }
-
-  const authData = pingerchips.authenticate(socket_id, channel_name, userData);
-  res.json(authData);
+```javascript
+mtls: {
+  enabled: true,
+  cert: fs.readFileSync('/path/to/client-cert.pem', 'utf8'),
+  key:  fs.readFileSync('/path/to/client-key.pem', 'utf8'),
+  ca:   fs.readFileSync('/path/to/ca-cert.pem', 'utf8'),
 }
 ```
+
+---
 
 ## Error Handling
 
-Always handle errors when triggering events:
+`trigger` throws on validation failures and non-2xx HTTP responses:
 
 ```javascript
 try {
-  await pingerchips.trigger('channel', 'event', { data: 'value' });
-  console.log('Event triggered successfully');
-} catch (error) {
-  console.error('Failed to trigger event:', error.message);
-  // Handle error appropriately
+  await pingerchips.trigger('my-channel', 'my-event', { text: 'Hello' });
+} catch (err) {
+  console.error(err.message);
+  // "channel must be a non-empty string"
+  // "data payload must be 64KB or less"
+  // "Failed to trigger event: 429 Too Many Requests - Rate limit exceeded"
+  // "Request timeout after 10000ms"
 }
 ```
 
-## Best Practices
+The SDK retries 5xx responses and network errors up to `retries` times (default 2) before throwing.
 
-1. **Store credentials securely** - Use environment variables for app ID, secret, and tokens
-2. **Validate users** - Always verify user identity before authenticating channels
-3. **Implement authorization** - Check if users have permission to access specific channels
-4. **Handle errors** - Wrap trigger calls in try-catch blocks
-5. **Rate limiting** - Implement rate limiting on your auth endpoint
-6. **Sanitize data** - Validate and sanitize data before triggering events
+---
 
 ## Next Steps
 
-- Learn about [Client SDK](/docs/sdk/client-sdk) for receiving events
-- Understand [Channel Types](/docs/sdk/channels) (public, private, presence)
-- Explore [Pingerflows](/docs/tutorial-basics/getting-started) for event transformation
+- [Client SDK](/docs/sdk/client-sdk) — receiving events in the browser
+- [Channel Types](/docs/sdk/channels) — public, private, presence
+- [HMAC Signing](/docs/hmac-signing) — raw signing reference for non-SDK integrations
+- [App Settings](/docs/app-settings) — rate limits, enable user authentication

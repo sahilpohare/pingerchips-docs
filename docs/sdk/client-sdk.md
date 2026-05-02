@@ -4,7 +4,7 @@ sidebar_position: 1
 
 # Client SDK (JavaScript)
 
-The Pingerchips JavaScript SDK allows you to receive real-time events in your web or Node.js applications.
+`pingerchips-js` is the browser/Node.js client SDK. It wraps Phoenix Channels to provide a simple pub/sub API.
 
 ## Installation
 
@@ -12,269 +12,216 @@ The Pingerchips JavaScript SDK allows you to receive real-time events in your we
 npm install pingerchips-js
 ```
 
-## Quick Start
+Requires ESM (`"type": "module"` in `package.json` or `.mjs` extension). Node.js ≥ 18 recommended for browser-compatible `fetch`.
+
+## Initialization
 
 ```javascript
 import Pingerchips from 'pingerchips-js';
 
-// Initialize the client
-const client = new Pingerchips('YOUR_APP_KEY', {
-  endpoint: 'wss://pinger-processor.pingerchips.com/socket'
-});
-
-// Subscribe to a channel
-const channel = await client.subscribe('lobby');
-
-// Listen for events
-channel.bind('message', (data) => {
-  console.log('Received message:', data);
-});
-
-// Send events
-channel.trigger('message', { text: 'Hello World!' });
+const client = new Pingerchips('YOUR_APP_KEY', options);
 ```
 
-## Configuration Options
+The socket connects immediately on construction.
 
-When initializing Pingerchips, you can provide the following options:
+### Constructor Options
 
-| Option | Type | Description | Required |
-|--------|------|-------------|----------|
-| `endpoint` | string | WebSocket endpoint URL | Yes |
-| `authEndpoint` | string | Your server's auth endpoint for private/presence channels | No |
-| `authInfo` | object | User authentication info passed to your auth endpoint | No |
-| `authHeaders` | object | Additional headers for auth requests | No |
-| `params` | object | Additional query parameters for the connection | No |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `endpoint` | string | `wss://queue.pingerchips.com/socket` | WebSocket endpoint |
+| `authEndpoint` | string | — | Your server's auth URL for private/presence channels |
+| `authInfo` | object | `{}` | Data sent to your auth endpoint in the `auth_info` field |
+| `authHeaders` | object | — | Extra HTTP headers added to auth requests |
+| `params` | object | — | Extra query params added to the WebSocket connection |
 
-### Example with Authentication
+### Example with authentication
 
 ```javascript
 const client = new Pingerchips('YOUR_APP_KEY', {
-  endpoint: 'wss://pinger-processor.pingerchips.com/socket',
-  authEndpoint: 'https://your-server.com/auth',
-  authInfo: {
-    userId: '123',
-    token: 'user-session-token'
-  },
-  authHeaders: {
-    'Authorization': 'Bearer your-token'
-  }
+  endpoint: 'wss://queue.pingerchips.com/socket',
+  authEndpoint: 'https://your-server.com/pingerchips/auth',
+  authInfo: { token: userSessionToken },
 });
 ```
+
+---
 
 ## Subscribing to Channels
 
-### Public Channels
+```javascript
+const channel = await client.subscribe('channel-name');
+```
 
-Public channels can be subscribed to by anyone:
+`subscribe` returns a `Promise<ChannelWrapper>`. If already subscribed to the same channel the existing wrapper is returned.
+
+### Public channels
 
 ```javascript
 const channel = await client.subscribe('lobby');
 ```
 
-### Private Channels
+No authentication required.
 
-Private channels require authentication and must be prefixed with `private-`:
+### Private channels
 
-```javascript
-const channel = await client.subscribe('private-chat-room');
-```
-
-:::note
-You must configure an `authEndpoint` to use private channels. See the [Server SDK Authentication](/docs/sdk/server-sdk#authentication) guide for details on setting up your auth endpoint.
-:::
-
-### Presence Channels
-
-Presence channels track who is subscribed and must be prefixed with `presence-`:
+Must be prefixed with `private-`. Requires `authEndpoint` to be configured.
 
 ```javascript
-const channel = await client.subscribe('presence-lobby');
-
-channel.bind('user-joined', (data) => {
-  console.log('User joined:', data.user_info);
-});
-
-channel.bind('user-left', (data) => {
-  console.log('User left:', data.user_info);
-});
+const channel = await client.subscribe('private-user-123');
 ```
+
+### Presence channels
+
+Must be prefixed with `presence-`. Requires `authEndpoint` and `userData` from the auth endpoint.
+
+```javascript
+const channel = await client.subscribe('presence-room');
+
+channel.bind('user-joined', (data) => console.log('Joined:', data.user_info));
+channel.bind('user-left',   (data) => console.log('Left:',   data.user_info));
+```
+
+---
 
 ## Channel Methods
 
 ### `bind(event, callback)`
 
-Listen for events on a channel:
+Listen for an event on the channel. Returns `this` for chaining.
 
 ```javascript
-channel.bind('message', (data) => {
-  console.log('Received:', data);
-});
-
-channel.bind('user-update', (data) => {
-  console.log('User updated:', data);
-});
-```
-
-### `trigger(event, data)`
-
-Send an event to a channel (client-to-client events):
-
-```javascript
-channel.trigger('typing', {
-  user: 'John',
-  isTyping: true
+channel.bind('new-message', (data) => {
+  console.log(data.text);
 });
 ```
 
 ### `unbind(event)`
 
-Stop listening for an event:
+Stop listening for an event. Returns `this`.
 
 ```javascript
-channel.unbind('message');
+channel.unbind('new-message');
+```
+
+### `trigger(event, data)`
+
+Send an event from this client to other subscribers (client-to-client). Requires **Enable Client Messages** to be on in [App Settings](/docs/app-settings).
+
+```javascript
+channel.trigger('typing', { userId: '42', isTyping: true });
 ```
 
 ### `leave()`
 
-Unsubscribe from a channel:
+Unsubscribe from the channel and clean up.
 
 ```javascript
 channel.leave();
 ```
 
-## Unsubscribing from Channels
+---
+
+## Client Methods
+
+### `unsubscribe(channelName)`
+
+Leave a channel by name.
 
 ```javascript
-// Using the client
 client.unsubscribe('lobby');
-
-// Or using the channel wrapper
-channel.leave();
 ```
 
-## Connection Events
+### `getSocketId()`
 
-Monitor connection status:
+Returns the server-assigned socket ID. Used when building your own auth endpoint calls. Throws if the socket is not yet connected.
 
 ```javascript
-const client = new Pingerchips('YOUR_APP_KEY', {
-  endpoint: 'wss://pinger-processor.pingerchips.com/socket'
-});
-
-// Connection will automatically establish
-// Check client.socket for connection status
+const socketId = client.getSocketId();
 ```
+
+### `getHttpEndpoint()`
+
+Returns the HTTP base URL derived from the WebSocket endpoint (strips `/socket`, replaces `ws://` → `http://`).
+
+```javascript
+const baseUrl = client.getHttpEndpoint();
+// e.g. "https://queue.pingerchips.com"
+```
+
+---
+
+## Reconnection
+
+The SDK reconnects automatically after disconnection (handled by the underlying Phoenix Socket). All subscribed channels are re-joined on reconnect — you do not need to re-call `subscribe`.
+
+---
+
+## Socket ID Availability
+
+The socket ID is set after the first channel join completes (the server returns it in the `ok` response). Before that, `getSocketId()` throws. For private/presence channel subscriptions the SDK waits for socket ID automatically.
+
+---
 
 ## Complete Example
 
 ```javascript
 import Pingerchips from 'pingerchips-js';
 
-// Initialize
 const client = new Pingerchips('YOUR_APP_KEY', {
-  endpoint: 'wss://pinger-processor.pingerchips.com/socket',
-  authEndpoint: 'https://your-app.com/auth',
-  authInfo: {
-    userId: '123',
-    token: 'session-token'
-  }
+  endpoint: 'wss://queue.pingerchips.com/socket',
+  authEndpoint: 'https://your-app.com/pingerchips/auth',
+  authInfo: { token: sessionToken },
 });
 
-// Subscribe to a public channel
-const publicChannel = await client.subscribe('announcements');
-publicChannel.bind('announcement', (data) => {
-  console.log('New announcement:', data.message);
-});
+// Public channel
+const news = await client.subscribe('announcements');
+news.bind('announcement', (data) => console.log('News:', data.message));
 
-// Subscribe to a private channel
-const privateChannel = await client.subscribe('private-user-123');
-privateChannel.bind('notification', (data) => {
-  console.log('Private notification:', data);
-});
+// Private channel
+const inbox = await client.subscribe('private-user-123');
+inbox.bind('notification', (data) => console.log('Notification:', data));
 
-// Subscribe to a presence channel
-const presenceChannel = await client.subscribe('presence-room');
+// Presence channel
+const room = await client.subscribe('presence-lobby');
+room.bind('user-joined', ({ user_info }) => addToOnlineList(user_info));
+room.bind('user-left',   ({ user_info }) => removeFromOnlineList(user_info));
+room.trigger('chat-message', { text: 'Hello!' });
 
-presenceChannel.bind('user-joined', (data) => {
-  console.log(`${data.user_info.name} joined the room`);
-});
-
-presenceChannel.bind('user-left', (data) => {
-  console.log(`${data.user_info.name} left the room`);
-});
-
-// Send a message
-presenceChannel.trigger('chat-message', {
-  text: 'Hello everyone!',
-  timestamp: Date.now()
-});
-
-// Cleanup when done
-// publicChannel.leave();
-// privateChannel.leave();
-// presenceChannel.leave();
+// Cleanup
+// news.leave();
+// inbox.leave();
+// room.leave();
 ```
 
-## Using with React
+---
+
+## React Hook Example
 
 ```jsx
-import { useEffect, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import Pingerchips from 'pingerchips-js';
 
-function ChatComponent() {
-  const [messages, setMessages] = useState([]);
-  const [client, setClient] = useState(null);
-  const [channel, setChannel] = useState(null);
+export function useChannel(appKey, channelName, options = {}) {
+  const channelRef = useRef(null);
 
   useEffect(() => {
-    // Initialize Pingerchips
-    const pingerchips = new Pingerchips('YOUR_APP_KEY', {
-      endpoint: 'wss://pinger-processor.pingerchips.com/socket'
+    const client = new Pingerchips(appKey, options);
+
+    client.subscribe(channelName).then((ch) => {
+      channelRef.current = ch;
     });
 
-    setClient(pingerchips);
-
-    // Subscribe to channel
-    pingerchips.subscribe('chat').then(ch => {
-      setChannel(ch);
-
-      ch.bind('message', (data) => {
-        setMessages(prev => [...prev, data]);
-      });
-    });
-
-    // Cleanup
-    return () => {
-      if (channel) channel.leave();
-    };
+    return () => channelRef.current?.leave();
   }, []);
 
-  const sendMessage = (text) => {
-    if (channel) {
-      channel.trigger('message', { text, timestamp: Date.now() });
-    }
-  };
-
-  return (
-    <div>
-      {messages.map((msg, i) => (
-        <div key={i}>{msg.text}</div>
-      ))}
-      <button onClick={() => sendMessage('Hello!')}>Send</button>
-    </div>
-  );
+  return channelRef;
 }
 ```
 
-## Browser Support
-
-The SDK works in all modern browsers that support WebSockets:
-- Chrome, Firefox, Safari, Edge (latest versions)
-- Mobile browsers (iOS Safari, Chrome Mobile)
+---
 
 ## Next Steps
 
-- Learn about [Server SDK](/docs/sdk/server-sdk) for triggering events from your backend
-- Set up [Authentication](/docs/sdk/server-sdk#authentication) for private and presence channels
-- Explore [Pingerflows](/docs/tutorial-basics/getting-started) to transform events
+- [Server SDK](/docs/sdk/server-sdk) — trigger events from your backend
+- [Channel Types](/docs/sdk/channels) — public, private, presence
+- [App Settings](/docs/app-settings) — enable client messages, user authentication

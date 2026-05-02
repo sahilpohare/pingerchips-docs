@@ -4,68 +4,43 @@ sidebar_position: 1
 
 # Server SDK Installation
 
-Install the Pingerchips Server SDK or use the Pusher-compatible SDK.
-
-## Option 1: Pingerchips Server SDK (Recommended)
+## Install
 
 ```bash
 npm install pingerchips-js-server
 ```
 
-### Usage
+Requires Node.js ≥ 14. ESM only — add `"type": "module"` to your `package.json` or use the `.mjs` extension.
+
+## Basic Usage
 
 ```javascript
 import PingerchipsServer from 'pingerchips-js-server';
 
-const pingerchips = new PingerchipsServer('APP_ID', 'APP_SECRET', {
-  appKey: 'APP_KEY',
-  endpoint: 'https://pinger-processor.pingerchips.com/api',
-  token: 'YOUR_API_TOKEN'
-});
+const pingerchips = new PingerchipsServer(
+  process.env.PINGERCHIPS_APP_KEY,
+  process.env.PINGERCHIPS_APP_SECRET,
+  {
+    endpoint: 'https://queue.pingerchips.com',
+  }
+);
 
-// Trigger an event
 await pingerchips.trigger('my-channel', 'my-event', {
-  message: 'Hello from server!'
+  message: 'Hello from server!',
 });
 ```
 
-**Benefits:**
-- Built specifically for Pingerchips
-- Supports authentication for private/presence channels
-- mTLS support for production
-- Modern ES6+ syntax
-
-See the [Server SDK Guide](/docs/sdk/server-sdk) for complete documentation.
-
-## Option 2: Pusher SDK (Compatible)
-
-You can use any [Pusher Server SDK](https://pusher.com/docs/channels/channels_libraries/libraries/) with Pingerchips.
+## Environment Variables
 
 ```bash
-npm install pusher
+PINGERCHIPS_APP_KEY=your-app-key
+PINGERCHIPS_APP_SECRET=your-app-secret
 ```
 
-### Usage
-
-```javascript
-const Pusher = require('pusher');
-
-const pusher = new Pusher({
-  appId: 'YOUR_APP_ID',
-  key: 'YOUR_APP_KEY',
-  secret: 'YOUR_APP_SECRET',
-  host: 'pinger-processor.pingerchips.com',
-  port: 443,
-  useTLS: true
-});
-
-await pusher.trigger('my-channel', 'my-event', {
-  message: 'Hello World'
-});
-```
+Never commit your App Secret. Keep it in environment variables only.
 
 ## Next Steps
 
-- Read the full [Server SDK documentation](/docs/sdk/server-sdk)
-- Learn about [channel types](/docs/sdk/channels)
-- Set up [authentication](/docs/sdk/server-sdk#authentication) for private channels
+- [Server SDK Reference](/docs/sdk/server-sdk) — full API documentation including authentication
+- [HMAC Signing](/docs/hmac-signing) — how request signing works
+- [Channel Types](/docs/sdk/channels) — public, private, presence
