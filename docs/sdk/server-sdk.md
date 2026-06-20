@@ -2,7 +2,13 @@
 sidebar_position: 2
 ---
 
-# Server SDK (Node.js)
+# Server SDK
+
+PingerChips provides server SDKs for Node.js and Python.
+
+---
+
+## Node.js (`pingerchips-js-server`)
 
 `pingerchips-js-server` triggers events from your backend and generates auth signatures for private and presence channels.
 
@@ -260,9 +266,198 @@ The SDK retries 5xx responses and network errors up to `retries` times (default 
 
 ---
 
+## Python (`pingerchips`)
+
+### Installation
+
+```bash
+pip install pingerchips
+```
+
+Requires Python ≥ 3.10. Dependencies: `httpx`.
+
+### Initialization
+
+```python
+from pingerchips import PingerChips
+
+pc = PingerChips(
+    host="https://queue.pingerchips.com",
+    app_id="YOUR_APP_KEY",
+    app_secret="YOUR_APP_SECRET",
+)
+```
+
+### Triggering Events
+
+```python
+# Public channel
+pc.trigger("announcements", "new-post", {"title": "v2 Released", "url": "/blog/v2"})
+
+# Private user channel
+pc.trigger(f"private-user-{user_id}", "notification", {"type": "order-shipped"})
+
+# Presence channel
+pc.trigger("presence-game-room", "game-state", {"round": 3, "timeRemaining": 45})
+```
+
+#### `trigger_batch`
+
+Trigger the same event on multiple channels in one request:
+
+```python
+pc.trigger_batch(["channel-a", "channel-b", "channel-c"], "update", {"value": 42})
+```
+
+### Authentication
+
+Generate auth payloads for `private-*` or `presence-*` channel joins. Call from your auth endpoint.
+
+```python
+from flask import Flask, request, jsonify
+from pingerchips import PingerChips
+
+app = Flask(__name__)
+pc = PingerChips(host="https://queue.pingerchips.com", app_id="APP_KEY", app_secret="APP_SECRET")
+
+@app.post("/pingerchips/auth")
+def pingerchips_auth():
+    socket_id    = request.json["socket_id"]
+    channel_name = request.json["channel_name"]
+
+    user = verify_session(request.json.get("auth_info", {}).get("token"))
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    user_data = None
+    if channel_name.startswith("presence-"):
+        user_data = {"user_id": user.id, "user_info": {"name": user.name}}
+
+    return jsonify(pc.channel_auth(socket_id, channel_name, user_data))
+```
+
+`channel_auth` returns:
+
+```python
+# Private channel
+{"auth": "appKey:hmac_signature"}
+
+# Presence channel
+{"auth": "appKey:hmac_signature", "channel_data": "{\"user_id\":\"...\"}"}
+```
+
+### Push Notifications
+
+```python
+# Send push notification (only if user is offline)
+pc.notify(user_id="user_123", title="New message", body="Alice said hello")
+
+# Always deliver, even if user is connected
+pc.notify(
+    user_id="user_123",
+    title="Alert",
+    body="Action required",
+    trigger="always",
+    data={"url": "/alerts"},
+)
+```
+
+#### Register / Unregister Device Tokens
+
+```python
+# Mobile (FCM or APNs)
+pc.register_push_token(
+    user_id="user_123",
+    device_id="device_abc",
+    platform="fcm",          # "fcm" or "apns"
+    token="FCM_TOKEN",
+)
+
+# Web Push
+pc.register_push_token(
+    user_id="user_123",
+    device_id="browser_xyz",
+    platform="web",
+    endpoint="https://fcm.googleapis.com/...",
+    p256dh="...",
+    auth="...",
+)
+
+pc.unregister_push_token(user_id="user_123", device_id="device_abc")
+```
+
+### Channel Config
+
+Control durability, replay, and ordering behavior when creating or updating flows via the API.
+
+```python
+from pingerchips import channel_config, durable_channel_config, ephemeral_channel_config
+
+# Custom config
+cfg = channel_config(durable=True, replay=True, max_replay_messages=500, ordering="strict")
+
+# Presets
+durable   = durable_channel_config()    # WAL + ClickHouse, strict ordering
+ephemeral = ephemeral_channel_config()  # no WAL, no replay, best-effort
+```
+
+### Chat REST API
+
+```python
+from pingerchips import PingerChipsChat
+
+chat = PingerChipsChat(
+    host="https://queue.pingerchips.com",
+    app_key="YOUR_APP_KEY",
+    app_secret="YOUR_APP_SECRET",
+)
+
+# Threads
+thread = chat.create_thread(title="Support #42", created_by="user_1")
+chat.join_thread(thread["id"], user_id="user_1", type="human", role="member")
+chat.join_thread(thread["id"], bot_id="support-bot", type="bot")
+
+# Messages
+chat.send_message(thread["id"], user_id="user_1",
+                  sender={"name": "Alice"}, content={"text": "Hello!"})
+messages = chat.list_messages(thread["id"])
+chat.edit_message(thread["id"], messages[0]["id"], content={"text": "Hello, updated"})
+chat.delete_message(thread["id"], messages[0]["id"])
+
+# Thread lifecycle
+chat.resolve_thread(thread["id"])
+chat.archive_thread(thread["id"])
+chat.handoff_thread(thread["id"], assigned_agent="agent_99")
+```
+
+Use as a context manager to ensure the HTTP client is closed:
+
+```python
+with PingerChipsChat(host="...", app_key="...", app_secret="...") as chat:
+    chat.send_message(thread_id, user_id="user_1", content={"text": "Hi"})
+```
+
+---
+
+## Feature Comparison
+
+| Feature | Node.js | Python |
+|---|---|---|
+| `trigger` | ✅ | ✅ |
+| `trigger_batch` | ✅ | ✅ |
+| Channel auth | ✅ | ✅ |
+| Push notifications | ✅ | ✅ |
+| Push token registration | ✅ | ✅ |
+| mTLS | ✅ | — |
+| Channel config builders | ✅ | ✅ |
+| Chat REST API | ✅ | ✅ |
+| Retry on 5xx | ✅ | ✅ |
+
+---
+
 ## Next Steps
 
-- [Client SDK](/docs/sdk/client-sdk) — receiving events in the browser
+- [Client SDK](/docs/sdk/client-sdk) — receiving events in the browser or backend
 - [Channel Types](/docs/sdk/channels) — public, private, presence
 - [HMAC Signing](/docs/hmac-signing) — raw signing reference for non-SDK integrations
 - [App Settings](/docs/app-settings) — rate limits, enable user authentication

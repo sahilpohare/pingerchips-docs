@@ -2,19 +2,25 @@
 sidebar_position: 1
 ---
 
-# Client SDK (JavaScript)
+# Client SDK
+
+PingerChips provides client SDKs for JavaScript and Python.
+
+---
+
+## JavaScript (`pingerchips-js`)
 
 `pingerchips-js` is the browser/Node.js client SDK. It wraps Phoenix Channels to provide a simple pub/sub API.
 
-## Installation
+### Installation
 
 ```bash
 npm install pingerchips-js
 ```
 
-Requires ESM (`"type": "module"` in `package.json` or `.mjs` extension). Node.js ≥ 18 recommended for browser-compatible `fetch`.
+Requires ESM (`"type": "module"` in `package.json` or `.mjs` extension). Node.js ≥ 18 recommended.
 
-## Initialization
+### Initialization
 
 ```javascript
 import Pingerchips from 'pingerchips-js';
@@ -24,7 +30,7 @@ const client = new Pingerchips('YOUR_APP_KEY', options);
 
 The socket connects immediately on construction.
 
-### Constructor Options
+#### Constructor Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -34,135 +40,103 @@ The socket connects immediately on construction.
 | `authHeaders` | object | — | Extra HTTP headers added to auth requests |
 | `params` | object | — | Extra query params added to the WebSocket connection |
 
-### Example with authentication
+### Subscribing to Channels
 
 ```javascript
-const client = new Pingerchips('YOUR_APP_KEY', {
-  endpoint: 'wss://queue.pingerchips.com/socket',
-  authEndpoint: 'https://your-server.com/pingerchips/auth',
-  authInfo: { token: userSessionToken },
+// Public channel
+const channel = await client.subscribe('lobby');
+
+// Private channel (requires authEndpoint)
+const inbox = await client.subscribe('private-user-123');
+
+// Presence channel (requires authEndpoint)
+const room = await client.subscribe('presence-lobby');
+
+// With tag filtering — only receive messages matching the ExSift query
+const alerts = await client.subscribe('sensor-data', {
+  filter: { 'data.level': { $eq: 'critical' } },
 });
-```
 
----
+// With delta compression — server sends diffs, client applies automatically
+const prices = await client.subscribe('live-prices', { delta: 'fossil' });
 
-## Subscribing to Channels
-
-```javascript
-const channel = await client.subscribe('channel-name');
+// With connection recovery — replay missed messages from this serial
+const orders = await client.subscribe('orders', {
+  after_serial: client.getLastSerial('orders'),
+});
 ```
 
 `subscribe` returns a `Promise<ChannelWrapper>`. If already subscribed to the same channel the existing wrapper is returned.
 
-### Public channels
+### Channel Methods
+
+#### `bind(event, callback)`
+
+Listen for an event. Returns `this` for chaining.
 
 ```javascript
-const channel = await client.subscribe('lobby');
+channel.bind('new-message', (data) => console.log(data.text));
 ```
 
-No authentication required.
+#### `unbind(event[, callback])`
 
-### Private channels
+Remove listener(s). Omit `callback` to remove all for the event.
 
-Must be prefixed with `private-`. Requires `authEndpoint` to be configured.
+#### `trigger(event, data)`
 
-```javascript
-const channel = await client.subscribe('private-user-123');
-```
-
-### Presence channels
-
-Must be prefixed with `presence-`. Requires `authEndpoint` and `userData` from the auth endpoint.
-
-```javascript
-const channel = await client.subscribe('presence-room');
-
-channel.bind('user-joined', (data) => console.log('Joined:', data.user_info));
-channel.bind('user-left',   (data) => console.log('Left:',   data.user_info));
-```
-
----
-
-## Channel Methods
-
-### `bind(event, callback)`
-
-Listen for an event on the channel. Returns `this` for chaining.
-
-```javascript
-channel.bind('new-message', (data) => {
-  console.log(data.text);
-});
-```
-
-### `unbind(event)`
-
-Stop listening for an event. Returns `this`.
-
-```javascript
-channel.unbind('new-message');
-```
-
-### `trigger(event, data)`
-
-Send an event from this client to other subscribers (client-to-client). Requires **Enable Client Messages** to be on in [App Settings](/docs/app-settings).
+Send a client event to other subscribers. Requires **Enable Client Messages** in [App Settings](/docs/app-settings).
 
 ```javascript
 channel.trigger('typing', { userId: '42', isTyping: true });
 ```
 
-### `leave()`
+#### `onRecoveryFailed(callback)`
 
-Unsubscribe from the channel and clean up.
+Called when the server cannot replay missed messages after reconnect.
 
 ```javascript
-channel.leave();
+channel.onRecoveryFailed(({ reason, channel, afterSerial }) => {
+  // reason: "position_expired" | "no_buffer"
+  // Re-fetch state from your API here
+});
 ```
 
----
+#### `leave()`
 
-## Client Methods
+Unsubscribe and clean up.
 
-### `unsubscribe(channelName)`
+### Client Methods
+
+#### `getLastSerial(channelName)`
+
+Returns the last received serial for a channel. Use to checkpoint recovery across page reloads.
+
+```javascript
+// Save before unload
+localStorage.setItem('ordersSerial', client.getLastSerial('orders'));
+
+// Restore on next load
+const serial = parseInt(localStorage.getItem('ordersSerial'));
+const ch = await client.subscribe('orders', { after_serial: serial });
+```
+
+#### `getSocketId()`
+
+Returns the server-assigned socket ID. Throws if not yet connected.
+
+#### `getHttpEndpoint()`
+
+Returns the HTTP base URL derived from the WebSocket endpoint.
+
+#### `unsubscribe(channelName)`
 
 Leave a channel by name.
 
-```javascript
-client.unsubscribe('lobby');
-```
+### Reconnection & Recovery
 
-### `getSocketId()`
+The SDK reconnects automatically after disconnection. On reconnect, all channels are re-joined and `after_serial` is passed automatically so the server replays any missed messages.
 
-Returns the server-assigned socket ID. Used when building your own auth endpoint calls. Throws if the socket is not yet connected.
-
-```javascript
-const socketId = client.getSocketId();
-```
-
-### `getHttpEndpoint()`
-
-Returns the HTTP base URL derived from the WebSocket endpoint (strips `/socket`, replaces `ws://` → `http://`).
-
-```javascript
-const baseUrl = client.getHttpEndpoint();
-// e.g. "https://queue.pingerchips.com"
-```
-
----
-
-## Reconnection
-
-The SDK reconnects automatically after disconnection (handled by the underlying Phoenix Socket). All subscribed channels are re-joined on reconnect — you do not need to re-call `subscribe`.
-
----
-
-## Socket ID Availability
-
-The socket ID is set after the first channel join completes (the server returns it in the `ok` response). Before that, `getSocketId()` throws. For private/presence channel subscriptions the SDK waits for socket ID automatically.
-
----
-
-## Complete Example
+### Complete Example
 
 ```javascript
 import Pingerchips from 'pingerchips-js';
@@ -173,29 +147,24 @@ const client = new Pingerchips('YOUR_APP_KEY', {
   authInfo: { token: sessionToken },
 });
 
-// Public channel
-const news = await client.subscribe('announcements');
-news.bind('announcement', (data) => console.log('News:', data.message));
+// Public channel with tag filtering
+const alerts = await client.subscribe('sensor-data', {
+  filter: { 'data.severity': { $gte: 2 } },
+});
+alerts.bind('message', (data) => console.log('Alert:', data));
 
-// Private channel
-const inbox = await client.subscribe('private-user-123');
-inbox.bind('notification', (data) => console.log('Notification:', data));
+// Private channel with delta compression
+const prices = await client.subscribe('private-prices', { delta: 'fossil' });
+prices.bind('message', (data) => updatePriceDisplay(data));
 
 // Presence channel
 const room = await client.subscribe('presence-lobby');
 room.bind('user-joined', ({ user_info }) => addToOnlineList(user_info));
 room.bind('user-left',   ({ user_info }) => removeFromOnlineList(user_info));
 room.trigger('chat-message', { text: 'Hello!' });
-
-// Cleanup
-// news.leave();
-// inbox.leave();
-// room.leave();
 ```
 
----
-
-## React Hook Example
+### React Hook Example
 
 ```jsx
 import { useEffect, useRef } from 'react';
@@ -206,17 +175,162 @@ export function useChannel(appKey, channelName, options = {}) {
 
   useEffect(() => {
     const client = new Pingerchips(appKey, options);
-
     client.subscribe(channelName).then((ch) => {
       channelRef.current = ch;
     });
-
     return () => channelRef.current?.leave();
   }, []);
 
   return channelRef;
 }
 ```
+
+---
+
+## Python (`pingerchips`)
+
+### Installation
+
+```bash
+pip install pingerchips
+```
+
+Requires Python ≥ 3.10.
+
+### Initialization
+
+```python
+from pingerchips import PingerChipsClient
+
+client = PingerChipsClient(
+    host="wss://queue.pingerchips.com",
+    app_key="YOUR_APP_KEY",
+    app_secret="YOUR_APP_SECRET",   # required for private/presence channels
+    auto_reconnect=True,
+    max_retries=5,
+    initial_backoff=1.0,
+)
+await client.connect()
+```
+
+### Subscribing to Channels
+
+```python
+# Public channel
+ch = await client.subscribe("lobby")
+
+# Private channel (app_secret is used to auto-sign the join)
+inbox = await client.subscribe("private-user-123")
+
+# Presence channel with user data
+room = await client.subscribe(
+    "presence-lobby",
+    user_data={"user_id": "user_123", "user_info": {"name": "Alice"}},
+)
+
+# With tag filtering
+alerts = await client.subscribe(
+    "sensor-data",
+    filter={"data.level": {"$eq": "critical"}},
+)
+
+# With delta compression (fossil or xdelta3)
+prices = await client.subscribe("live-prices", delta="fossil")
+
+# With connection recovery
+orders = await client.subscribe(
+    "orders",
+    after_serial=client.get_last_serial("orders"),
+)
+```
+
+### Channel Methods
+
+```python
+# Listen for events
+ch.on("message", lambda data: print(data))
+ch.on("pingerchips:join_success", lambda data: print("socket_id:", data["socket_id"]))
+
+# Remove listeners
+ch.off("message", my_callback)   # remove specific callback
+ch.off("message")                # remove all for event
+
+# Send a client event
+await ch.send("typing", {"user_id": "user_123", "typing": True})
+
+# Wait for join to complete
+joined = await ch.wait_for_join(timeout=10.0)
+
+# Recovery failure callback
+ch.on_recovery_failed(lambda data: print("recovery failed:", data["reason"]))
+```
+
+### Connection Recovery
+
+On reconnect, all channels are automatically re-joined with `after_serial` so the server replays missed messages.
+
+```python
+# Checkpoint the serial for cross-session recovery
+serial = client.get_last_serial("orders")
+# Next session:
+ch = await client.subscribe("orders", after_serial=serial)
+```
+
+### Complete Example
+
+```python
+import asyncio
+from pingerchips import PingerChipsClient
+
+async def main():
+    client = PingerChipsClient(
+        host="wss://queue.pingerchips.com",
+        app_key="APP_KEY",
+        app_secret="APP_SECRET",
+    )
+    await client.connect()
+
+    # Public channel with tag filtering
+    alerts = await client.subscribe(
+        "sensor-data",
+        filter={"data.level": {"$eq": "critical"}},
+    )
+    alerts.on("message", lambda d: print("Alert:", d))
+
+    # Private channel with delta compression
+    prices = await client.subscribe("private-prices", delta="fossil")
+    prices.on("message", lambda d: print("Price:", d))
+
+    # Presence channel
+    room = await client.subscribe(
+        "presence-lobby",
+        user_data={"user_id": "user_1", "user_info": {"name": "Alice"}},
+    )
+    room.on("user-joined", lambda d: print("Joined:", d))
+    room.on("user-left",   lambda d: print("Left:", d))
+
+    await client.listen()
+
+asyncio.run(main())
+```
+
+---
+
+## Feature Comparison
+
+| Feature | JS | Python |
+|---|---|---|
+| Public channels | ✅ | ✅ |
+| Private channels | ✅ | ✅ |
+| Presence channels | ✅ | ✅ |
+| Tag filtering | ✅ | ✅ |
+| Delta compression (fossil) | ✅ | ✅ |
+| Delta compression (xdelta3) | ⚠️ fallback to full | ⚠️ fallback to full |
+| Connection recovery | ✅ | ✅ |
+| Auto-reconnect with serial | ✅ | ✅ |
+| Client events (`trigger`/`send`) | ✅ | ✅ |
+| Push token registration | ✅ | — |
+| Chat (realtime) | ✅ | — |
 
 ---
 
