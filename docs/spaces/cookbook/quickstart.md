@@ -197,5 +197,5 @@ function CollabDoc({ docId, user }) {
 
 ## What's next
 
-- [SDK Reference](./sdk) — full `PingerchipsSpaces`, `Space`, `Cursors`, `Members`, `Locations`, `Locks` API
-- [Architecture](./architecture) — EphemeralChannel, SpaceWorker, wire protocol
+- [SDK Reference](../reference/sdk) — full `PingerchipsSpaces`, `Space`, `Cursors`, `Members`, `Locations`, `Locks` API
+- [Architecture](../reference/architecture) — EphemeralChannel, SpaceWorker, wire protocol

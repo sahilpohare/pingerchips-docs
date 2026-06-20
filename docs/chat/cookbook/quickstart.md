@@ -175,8 +175,8 @@ if (history.has_older) {
 
 ## What's next
 
-- [Core Concepts](./concepts) — threads, runs, conversation trees, archival
-- [Client SDK](./client-sdk) — full API reference for `PingerchipsChat` and `ChatSession`
-- [Agent SDK](./agent-sdk) — full API reference for `AgentSession` and `Run`
-- [Auth](./auth) — HMAC token flow in detail
-- [Architecture](./architecture) — WAL, `set_volatile`, GC, archival internals
+- [Core Concepts](../reference/concepts) — threads, runs, conversation trees, archival
+- [Client SDK](../reference/client-sdk) — full API reference for `PingerchipsChat` and `ChatSession`
+- [Agent SDK](../reference/agent-sdk) — full API reference for `AgentSession` and `Run`
+- [Auth](../cookbook/auth) — HMAC token flow in detail
+- [Architecture](../reference/architecture) — WAL, `set_volatile`, GC, archival internals

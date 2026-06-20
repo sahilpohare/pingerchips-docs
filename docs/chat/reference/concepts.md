@@ -6,7 +6,7 @@ sidebar_position: 2
 
 ## Threads
 
-A thread is the top-level container for a conversation. It has:
+A thread is the top-level container for a conversation.
 
 | Field | Type | Description |
 |---|---|---|
@@ -18,17 +18,28 @@ A thread is the top-level container for a conversation. It has:
 | `assigned_agent` | string? | Human agent handle (post-handoff) |
 | `metadata` | map | Arbitrary key-value pairs |
 
-Thread state is stored in the Durable Objects ring (real-time source of truth) and replicated to Postgres (search replica). You subscribe to a thread's channel to receive real-time updates:
+Thread state is stored in the Durable Objects ring and replicated to Postgres. Subscribe via:
 
 ```
 chat:v1:app:{appKey}:thread:{threadId}
 ```
 
+### Thread status flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> open : thread created
+    open --> bot : bot assigned
+    bot --> pending : bot hands off
+    pending --> active : human agent picks up
+    active --> resolved : conversation closed
+    resolved --> open : reopened
+    open --> resolved : directly resolved
+```
+
 ---
 
 ## Messages
-
-Messages are the individual units of content within a thread.
 
 | Field | Type | Description |
 |---|---|---|
@@ -36,9 +47,9 @@ Messages are the individual units of content within a thread.
 | `thread_id` | UUID | Parent thread |
 | `role` | string | `user` \| `assistant` \| `tool` \| `system` |
 | `content` | map | `{"text": "..."}` or structured content |
-| `run_id` | UUID? | The run that produced this message (assistant only) |
-| `parent_id` | UUID? | Parent message in the conversation tree |
-| `fork_of` | UUID? | Original message this was forked from (regenerate/edit) |
+| `run_id` | UUID? | The run that produced this message |
+| `parent_id` | UUID? | Parent in the conversation tree |
+| `fork_of` | UUID? | Original message this was regenerated from |
 | `owner_client_id` | string? | Client that sent this message |
 | `inserted_at` | ISO 8601 | Creation timestamp |
 
@@ -46,76 +57,79 @@ Messages are the individual units of content within a thread.
 
 ## Runs
 
-A run represents one LLM generation cycle. It is identified by a `run_id` (UUID) and scoped to a thread. Runs have a lifecycle:
+A run is one LLM generation cycle.
 
+```mermaid
+stateDiagram-v2
+    [*] --> running : run:start
+    running --> running : run:token ×N\n(buffered 40ms)
+    running --> done : run:end\nmessage committed
+    running --> suspended : run:suspend\nawaiting tool approval
+    suspended --> running : run:resume
+    suspended --> cancelled : cancel
+    running --> cancelled : cancel
+    done --> [*]
+    cancelled --> [*]
 ```
-run:start  →  run:token (×N)  →  run:end
-                     ↓
-              run:suspend  →  run:resume
-                     ↓
-                  (cancelled)
-```
 
-During an active run, the agent pushes `run:token` events containing incremental content. These are buffered in memory (40 ms rollup) and written to the WAL as a `stream:{runId}` volatile slot — a log-only write that skips full state serialisation.
-
-On `run:end`, the buffer flushes, the completed message is appended to the `messages` list, and the volatile slot is deleted. Subscribers receive `change` events throughout.
+During streaming, token chunks are buffered in a `TokenBuffer` GenServer and flushed every 40ms to the WAL as a `stream:{runId}` volatile slot. On `run:end` the final message is appended to `messages` and the volatile slot is dropped.
 
 ---
 
 ## Conversation tree
 
-Every message has an optional `parent_id` that points to the message it was replied to. This forms a tree, not a list — essential for branching flows like regeneration and editing.
+Messages form a **tree**, not a list. `parent_id` links each message to the one it replies to. `fork_of` links a regenerated message to the original.
 
-```
-msg-1 (user: "What is Elixir?")
-  └── msg-2 (assistant: "Elixir is a functional language...")
-        ├── msg-3 (user: "Tell me more about OTP")
-        │     └── msg-4 (assistant: "OTP stands for...")
-        └── msg-5 [fork_of: msg-2] (assistant: "Elixir is a concurrent, functional language...")
+```mermaid
+graph TD
+    M1["msg-1\nuser: What is Elixir?"]
+    M2["msg-2\nassistant: Elixir is a functional language..."]
+    M3["msg-3\nuser: Tell me more about OTP"]
+    M4["msg-4\nassistant: OTP stands for..."]
+    M5["msg-5 fork_of:msg-2\nassistant: Elixir is a concurrent language..."]
+
+    M1 --> M2
+    M2 --> M3
+    M3 --> M4
+    M2 -.->|regenerated| M5
+
+    style M5 fill:#fef9c3,stroke:#eab308
 ```
 
-When a user clicks "regenerate", the client sends a `regenerate` event. The server creates a new assistant message with `fork_of` pointing to the original, letting the UI display both branches.
+When a user regenerates, the server creates a new assistant message with `fork_of` pointing to the original. Both branches exist; the UI decides which to show.
 
 ---
 
 ## GC compaction
 
-The WAL stores every change as an append-only log. Over time this grows. Chat performs automatic GC compaction on `run:end`:
+The WAL grows with every write. Chat compacts on every `run:end`:
 
-1. Read current `messages` list from WAL
-2. Write the consolidated list back as a single `set` operation
-3. Mark the compaction point — all log entries before this are eligible for trimming
+```mermaid
+graph LR
+    RE[run:end] --> R[Read messages from WAL]
+    R --> W[set_all: messages ++ new_message\n+ drop stream slot]
+    W --> C[Compaction baseline reset]
 
-This keeps the WAL log lean. Compaction runs inside a transaction so it is safe under concurrent writers.
+    style C fill:#f0fdf4,stroke:#16a34a
+```
+
+`set_all` is atomic — all preceding log entries for `messages` can be trimmed safely.
 
 ---
 
 ## Load older / pagination
 
-The `load_older` client event retrieves historical messages in pages of 50, walking backwards from a `before_message_id` cursor:
+`load_older` walks backwards in pages of 50, from a `before_message_id` cursor.
 
-```js
-session.loadOlder(beforeMessageId);
-// → server pushes "older_messages" reply with { messages, has_older }
+```mermaid
+graph TD
+    LO[load_older\nbefore_message_id] --> Q{First item\nis archive stub?}
+    Q -->|No| RETURN[Return page from WAL]
+    Q -->|Yes| FETCH[Fetch archive file\nfrom S3 / disk]
+    FETCH --> STITCH[Stitch with WAL page]
+    STITCH --> RETURN
+
+    style FETCH fill:#eff6ff,stroke:#3b82f6
 ```
 
-If the thread has been archived (>500 messages, inactive >90 days), the oldest entries are replaced with an **archive stub** in the WAL:
-
-```json
-{ "archive_ref": "app_id/thread_id/before_message_id.json", "count": 520, "before_message_id": "msg-abc" }
-```
-
-`load_older` detects stubs and transparently fetches the archive, stitching pages together so the client experience is identical.
-
----
-
-## Generational archival
-
-The Archiver GenServer sweeps every 6 hours. Threads with >500 messages that have been inactive for >90 days are candidates for archival:
-
-1. Read the oldest messages from the WAL
-2. Write them to the configured archive backend (file or S3)
-3. Replace them in the WAL with an archive stub — inside a transaction with a re-check guard
-4. If the transaction fails (e.g. new messages arrived), the archive file is deleted and the thread is left intact
-
-Archive adapters: `FileAdapter` (default, JSON files on disk) and `S3Adapter` (ExAws).
+Archive stubs are transparent to the client — it always receives a normal `{ messages, has_older }` page.

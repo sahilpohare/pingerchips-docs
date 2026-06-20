@@ -152,9 +152,9 @@ curl https://your-host/api/v1/objects/order/order-42 \
 
 ## What's next
 
-- [Concepts](./concepts) — slots, log, rehydration, log replay
-- [Server SDK](./server-sdk) — full Node.js and Python API reference
-- [Client SDK](./client-sdk) — browser subscribe, resume, events
-- [HTTP API](./http-api) — REST endpoints and HMAC signing
-- [Auth](./auth) — per-object token flow
-- [Architecture](./architecture) — RocksDB, ring routing, `set_volatile`, handoff
+- [Concepts](../reference/concepts) — slots, log, rehydration, log replay
+- [Server SDK](../reference/server-sdk) — full Node.js and Python API reference
+- [Client SDK](../reference/client-sdk) — browser subscribe, resume, events
+- [HTTP API](../reference/http-api) — REST endpoints and HMAC signing
+- [Auth](../cookbook/auth) — per-object token flow
+- [Architecture](../reference/architecture) — RocksDB, ring routing, `set_volatile`, handoff

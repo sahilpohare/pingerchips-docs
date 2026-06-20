@@ -6,46 +6,52 @@ sidebar_position: 3
 
 ## State slots
 
-An object's **state** is a flat map of named slots. Each slot holds any JSON-serialisable value — string, number, boolean, array, or object.
+An object's **state** is a flat map of named slots. Each slot holds any JSON-serialisable value.
 
 ```js
 {
   "status":      "processing",
   "assigned_to": "agent-7",
   "retry_count": 2,
-  "metadata":    { "source": "web", "priority": "high" },
   "history":     [{ "event": "created", "at": 1718884800000 }]
 }
 ```
 
-Slot names are arbitrary strings. There is no schema — you decide what slots exist. Slots are created on first write and deleted explicitly.
+Slots are created on first write and deleted explicitly. No schema required.
 
 ---
 
 ## The append-only log
 
-Every write to an object appends an entry to its immutable log:
+Every write appends an immutable entry:
 
+```mermaid
+graph LR
+    subgraph Log ["Append-only log"]
+        direction TB
+        E1["1 · set · status · pending"]
+        E2["2 · set · assigned_to · agent-7"]
+        E3["3 · set_all · status:processing..."]
+        E4["4 · increment · retry_count · +1"]
+        E5["5 · append · history · shipped"]
+        E1 --> E2 --> E3 --> E4 --> E5
+    end
+    subgraph State ["Materialised state"]
+        S["status: processing\nretry_count: 1\nhistory: [...]"]
+    end
+    Log -->|replay| State
+
+    style Log fill:#fefce8,stroke:#ca8a04
+    style State fill:#f0fdf4,stroke:#16a34a
 ```
-log_id | op        | key           | value
--------|-----------|---------------|-----------------------------
-1      | set       | status        | "pending"
-2      | set       | assigned_to   | "agent-7"
-3      | set_all   | (batch)       | { status: "processing", ... }
-4      | increment | retry_count   | 1 (delta)
-5      | append    | history       | { event: "shipped", ... }
-6      | delete    | temp_lock     | -
-```
 
-`log_id` is a monotonically increasing integer, unique per object. It is returned on every write and included in every `change` event.
-
-The log is the source of truth. State is a materialised view derived by replaying the log. On server restart, the state is rebuilt from the log — no data loss possible.
+`log_id` is monotonically increasing, unique per object, returned on every write and included in every `change` event. State is rebuilt by replaying the log on restart — no data loss possible.
 
 ---
 
 ## Operations
 
-| Operation | Description | Return |
+| Operation | Description | Returns |
 |---|---|---|
 | `set(slot, value)` | Set a single slot | `{ logId }` |
 | `setAll(map)` | Set multiple slots atomically | `{ logId }` |
@@ -58,100 +64,71 @@ The log is the source of truth. State is a materialised view derived by replayin
 
 ---
 
-## Transactions
+## Object lifecycle
 
-A transaction is a linearised read-modify-write block. All reads and writes inside the transaction are atomic — no other write can interleave.
-
-```js
-await order.transaction(async (obj) => {
-  const slots = await obj.get('agent_slots', {});
-  slots['agent-7'] = { status: 'active', started_at: Date.now() };
-  await obj.set('agent_slots', slots);
-});
+```mermaid
+stateDiagram-v2
+    [*] --> cold : object exists in RocksDB
+    cold --> rehydrating : first write or subscribe
+    rehydrating --> hot : state loaded
+    hot --> hot : reads / writes / broadcasts
+    hot --> cold : 60s idle\nGenServer exits\nRocksDB stays
+    cold --> rehydrating : next access
+    hot --> [*] : purge()
+    cold --> [*] : purge()
 ```
 
-If the transaction function throws, no writes are committed.
-
-Transactions are serialised by the DurableObject Worker GenServer — only one transaction runs on an object at a time.
+Objects spring into existence on first write. There is no explicit create. `purge()` permanently deletes all state and log entries.
 
 ---
 
 ## Real-time subscriptions
 
-Every write immediately broadcasts a `change` event to all subscribers on the `durable:{appKey}:{type}:{key}` channel.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Server
+    participant Other as Other writer
 
-### Snapshot on join
+    C->>Server: subscribe (afterLogId: 17)
+    Server->>C: snapshot {state, log_id: 20}
+    Server->>C: change {key, value, log_id: 18} ← replayed
+    Server->>C: change {key, value, log_id: 19} ← replayed
+    Server->>C: change {key, value, log_id: 20} ← replayed
 
-When a client subscribes, the server sends a `snapshot` event containing the full current state and the latest `log_id`:
-
-```json
-{
-  "event":  "snapshot",
-  "state":  { "status": "processing", "retry_count": 2 },
-  "log_id": 17
-}
+    Other->>Server: set("status", "shipped")
+    Server->>C: change {key: status, value: shipped, log_id: 21}
 ```
 
-### Change events
-
-Each write produces a `change` event:
-
-```json
-{ "event": "change", "key": "status", "value": "shipped", "previous": "processing", "log_id": 18 }
-```
-
-Batch writes (`setAll`, `transaction`) produce a single `batch` event:
-
-```json
-{
-  "event": "batch",
-  "changes": [
-    { "key": "status", "value": "shipped" },
-    { "key": "shipped_at", "value": 1718884800000 }
-  ],
-  "log_id": 19
-}
-```
+Every subscriber receives changes in log order. `afterLogId` replays only missed entries — efficient RocksDB prefix scan, not a full scan.
 
 ---
 
-## Resumable subscribe
+## Transactions
 
-Clients can reconnect without missing changes by passing `afterLogId`:
+Transactions are serialised by the Worker GenServer — only one runs at a time per object.
 
-```js
-const order = await pc.object('order', 'order-42', {
-  afterLogId: loadCheckpoint('order-42'),
-});
+```mermaid
+sequenceDiagram
+    participant App
+    participant W as Worker GenServer
 
-order.on('change', (entry) => {
-  processChange(entry);
-  saveCheckpoint('order-42', entry.logId);
-});
+    App->>W: transaction(fn)
+    W->>W: lock mailbox
+    W->>W: fn: get("status") → "processing"
+    W->>W: fn: set("status", "shipped")
+    W->>W: append log entries
+    W->>W: broadcast change
+    W-->>App: {logId}
+    W->>W: unlock mailbox
 ```
 
-On reconnect, the server replays all log entries after `afterLogId` before sending new changes. This is a first-class operation — efficient prefix scan in RocksDB, not a full table scan.
-
----
-
-## Object lifecycle
-
-Objects are **cold by default**. A DurableObject Worker GenServer is started on demand (first write or first subscribe) and evicted after 60 seconds of idle. The RocksDB data persists on the vnode indefinitely.
-
-On the next access after eviction, the worker rehydrates from RocksDB — either from the state snapshot (fast path, ~10µs) or by replaying the log (recovery path). From the SDK's perspective this is invisible.
-
-There is no explicit "create" or "destroy" call. An object springs into existence on first write and can be purged explicitly:
-
-```js
-await order.purge(); // server SDK only
-```
-
-Purge deletes all state and log entries from RocksDB.
+If the callback throws, no writes are committed.
 
 ---
 
 ## Consistency guarantees
 
-- **Within one object**: all writes are linearised. Reads always reflect the most recently committed write. `increment` and `transaction` are always atomic.
-- **Across objects**: no cross-object transactions. For multi-object consistency patterns, use an orchestrator that writes sequentially.
-- **Subscribers**: change events are delivered in log order. A subscriber can never see event N+1 before event N.
+- **Within one object**: all writes are linearised. `increment` and `transaction` are always atomic.
+- **Across objects**: no cross-object transactions. Use an orchestrating process that writes sequentially.
+- **Subscribers**: change events delivered in log order — a subscriber can never see log_id N+1 before N.

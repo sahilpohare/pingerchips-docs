@@ -176,7 +176,7 @@ const token = pc.authenticateObject(socketId, objectType, objectKey);
 // { auth: "appKey:hmac_signature" }
 ```
 
-Use this in your auth endpoint — see [Auth](./auth).
+Use this in your auth endpoint — see [Auth](../cookbook/auth).
 
 ---
 
