@@ -50,42 +50,42 @@ The Worker serialises all writes — no per-slot locking needed. RocksDB data pe
 
 ```mermaid
 sequenceDiagram
-    participant SDK as Server SDK
-    participant W as DurableObject.Worker
+    participant SDK as Server SDK / HTTP
+    participant RT as Router (coordinator)
+    participant W as Worker on each replica vnode
     participant R as RocksDB
     participant PS as Phoenix.PubSub
     participant Sub as Subscribers
 
-    SDK->>W: GenServer.call({:set, slot, value})
-    W->>W: update in-memory state map
-    W->>R: write state snapshot + log entry
-    W->>PS: broadcast change event
-    PS-->>Sub: change / batch event
-    W-->>SDK: {:ok, log_id}
+    SDK->>RT: set / append / transaction
+    RT->>RT: read canonical state, turn the call into ops
+    RT->>W: replicate ops with the expected log_id
+    W->>R: write one log entry per op (+ snapshot every 32 log ids)
+    W-->>RT: ack (write quorum)
+    RT->>PS: broadcast batch {changes, log_id}
+    PS-->>Sub: batch event
+    RT-->>SDK: {:ok, log_id}
 ```
 
 ---
 
-## `set_volatile`: log-only writes
+## Log entries and snapshots
 
-Used internally by Chat token streaming — skips the state snapshot write.
+Every op is one log entry:
 
-```mermaid
-graph TD
-    subgraph Normal ["Normal :set"]
-        A[state_key → full state binary]
-        B[log_key → entry]
-    end
-    subgraph Volatile [":set_volatile"]
-        C[log_key → entry only]
-    end
-
-    style A fill:#fee2e2,stroke:#ef4444
-    style B fill:#fef9c3,stroke:#eab308
-    style C fill:#dcfce7,stroke:#16a34a
+```
+%{op: "set",    key: slot, value: term, log_id: n}
+%{op: "delete", key: slot,              log_id: n}
+%{op: "append", key: slot, value: item, log_id: n}   # only the appended item
 ```
 
-On crash + rehydrate, volatile log entries replay identically to normal writes.
+An `append` entry holds only the new item, so appending to a long list costs O(1) on disk. The materialised state snapshot is rewritten only when a commit crosses a multiple of 32 log ids; rehydration reads the snapshot and replays the entries after it. Full-list `set` entries written by older releases still replay unchanged.
+
+On the wire an `append` entry always appears as `{key, op: "append", item, log_id}` (`after_log_id` replay `change`, `GET /log`) and as `{key, op: "append", item}` inside a live `batch`. Clients apply it as `state[key] = [...(state[key] ?? []), item]`.
+
+### Rolling deploys
+
+Item-only `append` entries are written only when the `DURABLE_APPEND_OPS` flag is on **and** every ring member runs code that can replay them; otherwise appends are written as a full-list `set`. See `deploy/README.md` in the server repo for the two-release rollout and the rollback rule.
 
 ---
 
@@ -124,16 +124,17 @@ sequenceDiagram
     participant W as Worker / RocksDB
     participant PS as PubSub
 
-    C->>DC: join durable:{appKey}:{type}:{key}
-    DC->>W: get_all (state + log_id)
-    W-->>DC: snapshot
-    DC->>W: log entries after afterLogId (if provided)
-    W-->>DC: missed changes
-    DC->>C: snapshot event + replayed changes
+    C->>DC: join durable:{appKey}:{type}:{key} (after_log_id?)
+    DC->>PS: subscribe to the object's topic
+    DC->>W: log entries after after_log_id (if provided)
+    W-->>DC: missed entries
+    DC->>C: replayed change events
+    DC->>W: state + log_id
+    DC->>C: snapshot event
 
     Note over DC,PS: Worker and Channel decoupled via PubSub
     W->>PS: broadcast on future writes
-    PS-->>C: change / batch events
+    PS-->>C: batch events
 ```
 
 ---

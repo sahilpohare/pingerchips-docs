@@ -176,7 +176,7 @@ off();
 
 #### `onToken(handler): () => void`
 
-Fires on each `change` event for a `stream:{runId}` slot — i.e. each time the token rollup buffer flushes (every ~40 ms).
+Fires on each `stream:{runId}` change (delivered inside a `batch`) — i.e. each time the token rollup buffer flushes (every ~40 ms).
 
 ```js
 session.onToken((runId: string, content: string) => {
@@ -266,7 +266,7 @@ interface ActiveRun {
   runId:    string;
   agentId:  string;
   content:  string;   // accumulated tokens so far
-  status:   'running' | 'suspended';
+  status:   'active' | 'suspended';
 }
 
 interface ToolCall {

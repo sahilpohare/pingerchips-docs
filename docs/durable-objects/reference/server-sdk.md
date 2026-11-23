@@ -13,20 +13,24 @@ Write to Durable Objects from your backend. Supports Node.js and Python.
 ### Install
 
 ```bash
-npm install pingerchips-js
+npm install pingerchips-js-server
 ```
 
 ### Setup
 
 ```js
-import PingerchipsServer from 'pingerchips-js/server';
+import PingerchipsServer from 'pingerchips-js-server';
 
 const pc = new PingerchipsServer(
   process.env.PINGER_KEY,
   process.env.PINGER_SECRET,
-  { host: 'https://your-host' }  // optional, defaults to Pingerchips cloud
+  { endpoint: 'https://your-host' }  // optional, defaults to https://queue.pingerchips.com in production
 );
 ```
+
+Every call is an HTTP request to [`/api/v1/objects`](./http-api) authenticated with
+`X-App-Key` + `X-App-Secret`. 5xx responses are retried (`retries` option, default `2`);
+any other non-2xx response throws.
 
 ### Get an object handle
 
@@ -34,74 +38,91 @@ const pc = new PingerchipsServer(
 const order = pc.object('order', 'order-42');
 ```
 
-The handle is lightweight — no network call. All operations are lazy.
+The handle is lightweight — no network call until you use it.
 
 ---
 
 ### Reading
 
-#### `object.get(slot, default?)`
+#### `object.get(slot)`
+
+Resolves to the slot's value, or `null` if the slot doesn't exist.
 
 ```js
 const status = await order.get('status');
 // "processing"
 
-const count = await order.get('retry_count', 0);
-// 0 if slot doesn't exist
+const count = (await order.get('retry_count')) ?? 0;
 ```
 
 #### `object.state()`
 
-Returns the full state map.
+Resolves to the full state map and the object's current `log_id`.
 
 ```js
-const state = await order.state();
-// { status: "processing", assigned_to: "agent-7", retry_count: 2 }
+const { state, log_id } = await order.state();
+// state:  { status: "processing", assigned_to: "agent-7", retry_count: 2 }
+// log_id: 17
 ```
+
+#### `object.log(afterId = 0)`
+
+Resolves to `{ items }`: every log entry with `log_id > afterId`, in order. Use it to
+catch a server process up from a checkpoint.
+
+```js
+const { items } = await order.log(17);
+// [
+//   { op: "set",    key: "status", value: "shipped",            log_id: 18 },
+//   { op: "append", key: "history", item: { event: "shipped" }, log_id: 19 },
+//   { op: "delete", key: "temp_lock",                           log_id: 20 }
+// ]
+```
+
+An `append` entry carries only the appended `item`, never the whole list. To apply
+entries to a local copy: `op === 'append'` → push `item` onto `state[key] ?? []`;
+`op === 'delete'` → remove the slot; otherwise → `state[key] = value`.
 
 ---
 
 ### Writing
 
-All write operations return `{ logId }` (plus `value` for `increment`).
+All write operations resolve to `{ log_id }` (plus `value` for `increment`).
 
 #### `object.set(slot, value)`
 
 ```js
-const { logId } = await order.set('status', 'shipped');
+const { log_id } = await order.set('status', 'shipped');
 ```
 
 #### `object.setAll(map)`
 
-Atomic multi-slot write. All slots update in a single log entry.
+Atomic multi-slot write: one commit, one `batch` event.
 
 ```js
-const { logId } = await order.setAll({
+const { log_id } = await order.setAll({
   status:     'shipped',
   shipped_at: Date.now(),
 });
 ```
 
-#### `object.increment(slot, delta?)`
+#### `object.increment(slot, by = 1)`
 
-Atomic increment. `delta` defaults to `1`.
+Atomic increment. The slot is treated as `0` if it doesn't exist.
 
 ```js
-const { logId, value } = await order.increment('retry_count');
+const { log_id, value } = await order.increment('retry_count');
 // value: 3
 
-const { logId, value } = await order.increment('score', 10);
-// value: previous + 10
+await order.increment('score', 10);
 ```
-
-Slot is initialised to `0` if it doesn't exist.
 
 #### `object.append(slot, item)`
 
-Appends one item to the list stored at `slot`. Slot is initialised to `[]` if it doesn't exist.
+Appends one item to the list stored at `slot`. The slot is treated as `[]` if it doesn't exist.
 
 ```js
-const { logId } = await order.append('history', {
+const { log_id } = await order.append('history', {
   event: 'status_change',
   from:  'processing',
   to:    'shipped',
@@ -115,24 +136,26 @@ const { logId } = await order.append('history', {
 Removes a slot from state.
 
 ```js
-const { logId } = await order.delete('temp_lock');
+const { log_id } = await order.delete('temp_lock');
 ```
 
-#### `object.transaction(fn)`
+#### `object.transaction(ops)`
 
-Atomic read-modify-write. The callback receives a transaction object with the same `get` / `set` / `setAll` / `increment` / `append` / `delete` API.
+Applies a list of ops atomically, in order — all commit or none do. Each op is
+`{ op: 'set', key, value }`, `{ op: 'delete', key }`, `{ op: 'increment', key, by }`
+or `{ op: 'append', key, value }`.
 
 ```js
-const { logId } = await order.transaction(async (obj) => {
-  const current = await obj.get('status');
-  if (current !== 'processing') return; // read-only — no commit
-
-  await obj.set('status', 'shipped');
-  await obj.append('history', { event: 'shipped', at: Date.now() });
-});
+const { log_id } = await order.transaction([
+  { op: 'set',       key: 'status',      value: 'shipped' },
+  { op: 'increment', key: 'retry_count', by: 1 },
+  { op: 'append',    key: 'history',     value: { event: 'shipped', at: Date.now() } },
+]);
 ```
 
-If the callback throws or returns without writing, the transaction commits with no changes.
+The ops are fixed before they are sent: there is no server-side callback, so a
+transaction cannot branch on the object's current state. If an op cannot apply (for example
+`append` to a slot that is not a list) nothing commits and the call throws (HTTP `422`).
 
 #### `object.purge()`
 
@@ -144,39 +167,25 @@ await order.purge();
 
 ---
 
-### Subscribe from server
+### Real-time changes
 
-Server processes can also subscribe to real-time changes.
-
-```js
-const sub = await order.subscribe({ afterLogId: 17 });
-
-sub.on('change', ({ key, value, previous, logId }) => {
-  console.log(`${key}: ${previous} → ${value}`);
-});
-
-sub.on('batch', ({ changes, logId }) => {
-  for (const { key, value } of changes) {
-    console.log(`${key} → ${value}`);
-  }
-});
-
-// Cleanup
-sub.unsubscribe();
-```
+The server SDK is HTTP-only — it has no `subscribe()`. To react to changes in real
+time, join the object's socket channel with the [Client SDK](./client-sdk). To catch up after downtime from a server process, store the last `log_id` you
+handled and call `object.log(lastLogId)`.
 
 ---
 
 ### Auth helper
 
-Issue a client-side auth token:
+Issue a client-side auth token for one object:
 
 ```js
 const token = pc.authenticateObject(socketId, objectType, objectKey);
-// { auth: "appKey:hmac_signature" }
+// { auth: "{appKey}.{payloadB64}.{sigB64}" }
 ```
 
-Use this in your auth endpoint — see [Auth](../cookbook/auth).
+The token grants `object:read:{type}/{key}` bound to that socket. Use this in your
+auth endpoint — see [Auth](../cookbook/auth).
 
 ---
 
@@ -191,12 +200,13 @@ pip install pingerchips
 ### Setup
 
 ```python
+import os, time
 from pingerchips import PingerChips
 
 pc = PingerChips(
-    os.environ["PINGER_KEY"],
-    os.environ["PINGER_SECRET"],
-    host="https://your-host",  # optional
+    host="https://your-host",
+    app_id=os.environ["PINGER_KEY"],
+    app_secret=os.environ["PINGER_SECRET"],
 )
 
 order = pc.object("order", "order-42")
@@ -204,40 +214,41 @@ order = pc.object("order", "order-42")
 
 ### Operations
 
+The Python client is synchronous. Write methods return the decoded JSON reply
+(`{"log_id": ...}`, plus `"value"` for `increment`).
+
 ```python
 # Read
-state  = await order.state()
-status = await order.get("status")
-count  = await order.get("retry_count", default=0)
+snapshot = order.state()          # {"state": {...}, "log_id": 17}
+status   = order.get("status")    # None if the slot doesn't exist
+entries  = order.log(17)["items"] # log entries after log_id 17
 
 # Write
-await order.set("status", "shipped")
+order.set("status", "shipped")
 
-await order.set_all({
+order.set_all({
     "status":     "shipped",
     "shipped_at": int(time.time() * 1000),
 })
 
-result = await order.increment("retry_count")
-print(result.value)  # 3
+result = order.increment("retry_count")
+print(result["value"])  # 3
 
-await order.append("history", {
+order.append("history", {
     "event": "shipped",
     "at":    int(time.time() * 1000),
 })
 
-await order.delete("temp_lock")
+order.delete("temp_lock")
 
-# Transaction
-async def fulfil(obj):
-    current = await obj.get("status")
-    if current == "processing":
-        await obj.set("status", "shipped")
-
-await order.transaction(fulfil)
+# Transaction — same op list as Node.js
+order.transaction([
+    {"op": "set",    "key": "status",  "value": "shipped"},
+    {"op": "append", "key": "history", "value": {"event": "shipped"}},
+])
 
 # Purge
-await order.purge()
+order.purge()
 ```
 
 ---
@@ -250,12 +261,11 @@ Durable Objects are designed for multi-agent pipelines where agents need shared,
 async function runAgent(runId, agentId, pipeline) {
   const run = pc.object('run', runId);
 
-  // Claim a slot in the run
-  await run.transaction(async (obj) => {
-    const slots = await obj.get('agent_slots', {});
-    slots[agentId] = { status: 'active', started_at: Date.now() };
-    await obj.set('agent_slots', slots);
-  });
+  // Register the agent in one atomic commit
+  await run.transaction([
+    { op: 'set',    key: `agents.${agentId}.status`, value: 'active' },
+    { op: 'append', key: 'agent_ids',               value: agentId },
+  ]);
 
   try {
     for (const step of pipeline) {
@@ -280,4 +290,4 @@ async function runAgent(runId, agentId, pipeline) {
 }
 ```
 
-The orchestrator subscribes on the client side and reacts to agent progress in real time — no polling needed.
+The orchestrator joins the object with the [Client SDK](./client-sdk) and reacts to agent progress in real time — no polling needed.

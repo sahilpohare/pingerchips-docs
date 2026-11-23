@@ -18,7 +18,8 @@ Track an order through a fulfilment pipeline in real time.
 ## 1. Install
 
 ```bash
-npm install pingerchips-js
+npm install pingerchips-js-server   # server
+npm install pingerchips-js          # browser
 ```
 
 ---
@@ -27,7 +28,7 @@ npm install pingerchips-js
 
 ```js
 // server.js
-import PingerchipsServer from 'pingerchips-js/server';
+import PingerchipsServer from 'pingerchips-js-server';
 
 const pc = new PingerchipsServer(
   process.env.PINGER_KEY,
@@ -76,8 +77,9 @@ console.log(order.state);
 // { status: "processing", assigned_to: "agent-7", retry_count: 1, history: [...] }
 
 // Listen to all changes
-order.on('change', ({ key, value, previous, logId }) => {
-  console.log(`${key}: ${previous} → ${value} (log ${logId})`);
+order.on('change', ({ key, op, item, value, previous, log_id }) => {
+  if (op === 'append') console.log(`${key} += ${JSON.stringify(item)} (log ${log_id})`);
+  else console.log(`${key}: ${previous} → ${value} (log ${log_id})`);
 });
 
 // Listen to a specific slot
@@ -108,33 +110,29 @@ app.post('/auth/durable', (req, res) => {
 
 ---
 
-## 5. Atomic read-modify-write
+## 5. Atomic multi-op write
 
-Use a transaction when the new value depends on the current value:
+Use a transaction when several slots must change together:
 
 ```js
-await order.transaction(async (obj) => {
-  const current = await obj.get('status');
-  if (current === 'processing') {
-    await obj.set('status', 'shipped');
-    await obj.append('history', { event: 'shipped', at: Date.now() });
-  }
-});
+await order.transaction([
+  { op: 'set',    key: 'status',  value: 'shipped' },
+  { op: 'append', key: 'history', value: { event: 'shipped', at: Date.now() } },
+]);
 ```
 
-Transactions are linearised — no two transactions on the same object run concurrently.
+All ops commit or none do, and subscribers receive them as one `batch` with one `log_id`. Transactions are linearised — no two writes to the same object run concurrently.
 
 ---
 
 ## 6. Read the current state (HTTP)
 
-All objects are also accessible over HTTP, authenticated with your app credentials:
+All objects are also accessible over HTTP, authenticated with your app credentials (server-side only):
 
 ```bash
-curl https://your-host/api/v1/objects/order/order-42 \
-  -H "X-App-Key: pk_live_..." \
-  -H "X-Signature: ..." \
-  -H "X-Timestamp: ..."
+curl https://your-host/api/v1/objects/$APP_KEY/order/order-42 \
+  -H "X-App-Key: $APP_KEY" \
+  -H "X-App-Secret: $APP_SECRET"
 ```
 
 ```json
@@ -155,6 +153,6 @@ curl https://your-host/api/v1/objects/order/order-42 \
 - [Concepts](../reference/concepts) — slots, log, rehydration, log replay
 - [Server SDK](../reference/server-sdk) — full Node.js and Python API reference
 - [Client SDK](../reference/client-sdk) — browser subscribe, resume, events
-- [HTTP API](../reference/http-api) — REST endpoints and HMAC signing
+- [HTTP API](../reference/http-api) — REST endpoints and auth headers
 - [Auth](../cookbook/auth) — per-object token flow
-- [Architecture](../reference/architecture) — RocksDB, ring routing, `set_volatile`, handoff
+- [Architecture](../reference/architecture) — RocksDB, ring routing, handoff

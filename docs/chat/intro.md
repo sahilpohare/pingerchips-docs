@@ -30,7 +30,7 @@ A **thread** is the durable unit — one WebSocket channel per thread:
 chat:v1:app:{appKey}:thread:{threadId}
 ```
 
-A **run** is one LLM generation: it starts, streams tokens, and ends. Token chunks bypass full state serialisation via `set_volatile` — only a tiny log entry is written per flush, not the entire thread state.
+A **run** is one LLM generation: it starts, streams tokens, and ends. Token chunks are batched every 40ms; each flush writes one log entry for the run's `stream:{runId}` slot (its text so far, never the whole thread) and broadcasts only the new span. The full thread state is snapshotted just once every 32 log entries.
 
 ## Run lifecycle
 

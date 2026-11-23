@@ -16,7 +16,7 @@ Chat uses a two-layer storage model:
 ```mermaid
 graph LR
     C[Client / Agent] -->|WebSocket push| CH[ChatChannel]
-    CH -->|DR.set_all\nDR.append\nDR.set_volatile| W[DurableObject.Worker\nGenServer]
+    CH -->|DR.transaction\nDR.set| W[DurableObject.Worker\nGenServer]
     W -->|write| RDB[(RocksDB)]
     W -->|broadcast| SUB[Subscribers]
     CH -->|async| DS[DurableSync]
@@ -43,68 +43,46 @@ sequenceDiagram
 
     C->>CH: push event (send / run:token / run:end)
     CH->>CH: validate + authorize
-    CH->>W: DR.set_all / append / set_volatile
+    CH->>W: DR.transaction / DR.set
     W->>W: update in-memory state
-    W->>R: write log entry (+ snapshot if not volatile)
-    W-->>C: broadcast change event
+    W->>R: write one log entry per op (+ snapshot every 32 log ids)
+    W-->>C: broadcast batch event
     CH-->>P: DurableSync upsert (async)
 ```
 
 ---
 
-## Token streaming and `set_volatile`
+## Token streaming
 
-LLM agents push tokens at up to 1,500/sec per run. Two optimisations prevent this from saturating RocksDB:
-
-### 1. Token rollup buffer (40ms)
+LLM agents push tokens at up to 1,500/sec per run. A rollup buffer keeps this from saturating RocksDB:
 
 ```mermaid
 graph LR
     A[Agent: run:token ×N\n~1500/sec] --> TB[TokenBuffer\nGenServer]
     TB -->|flush every 40ms\n~25/sec| W[DurableObject.Worker]
-    W -->|set_volatile| R[(RocksDB\nlog entry only)]
-    W -->|change event| SUB[Subscribers]
+    W -->|log entry\nsnapshot every 32 log ids| R[(RocksDB)]
+    W -->|batch event\nnew span only| SUB[Subscribers]
 ```
 
-### 2. `set_volatile` vs normal write
-
-```mermaid
-graph TD
-    subgraph Normal ["Normal set_all"]
-        N1[state_key → full_state_binary]
-        N2[log_key → entry]
-    end
-    subgraph Volatile ["set_volatile"]
-        V1[log_key → entry only]
-    end
-
-    style N1 fill:#fee2e2,stroke:#ef4444
-    style N2 fill:#fef9c3,stroke:#eab308
-    style V1 fill:#dcfce7,stroke:#16a34a
-```
-
-At 1,000 concurrent runs × 25 flushes/sec = 25,000 writes/sec. With `set_volatile`, each is a ~200-byte log entry. Without it, each would serialise the entire thread state — potentially MBs per write.
-
-On crash + rehydrate, `set_volatile` log entries replay identically to normal writes. On `run:end` the volatile slot is dropped.
+Each flush is a transaction that sets `stream:{runId}` to the text accumulated so far, and only while the run is live (a flush after the run ended writes nothing). That is one log entry holding the run's text, not the thread; the full state snapshot is rewritten only once every 32 log ids, so a 25-flush/sec run does not serialise the whole thread on every flush. Subscribers receive a `batch` whose `stream:{runId}` change carries only the new span as `append`. On crash + rehydrate, the snapshot plus the log entries after it rebuild the stream slot exactly.
 
 ---
 
-## GC compaction
+## Run compaction
 
-The WAL log grows with every write. Chat compacts on every `run:end`:
+Every run ending (`run:end`, `cancel`, sweeper timeout) folds its stream into one message:
 
 ```mermaid
 graph TD
-    RE[run:end] --> TX[DR transaction]
-    TX --> R1[Read current messages list]
-    TX --> R2[Build final message]
-    TX --> W1[set_all: messages ++ new_message\nstream:runId → nil]
-    W1 --> RC[Compaction baseline reset\nold log entries eligible for trim]
+    RE[run ends] --> FL[Flush TokenBuffer]
+    FL --> TX[DR transaction]
+    TX --> W1["append messages ← final message\nset run:{runId} status\ndelete stream:{runId}\nset last_message_id"]
+    W1 --> B[batch event + DurableSync to Postgres]
 
-    style RC fill:#f0fdf4,stroke:#16a34a
+    style B fill:#f0fdf4,stroke:#16a34a
 ```
 
-`set_all` is atomic — the new state contains everything the preceding log entries represented, so trimming them is safe.
+The message is written as an item-only `append` log entry — the transaction never rewrites the whole `messages` list, so its cost does not grow with the thread.
 
 ---
 

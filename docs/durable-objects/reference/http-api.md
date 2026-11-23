@@ -6,38 +6,27 @@ sidebar_position: 6
 
 Every Durable Object operation is available over REST. Useful for server-to-server calls, scripts, and languages without an SDK.
 
-All endpoints are under `/api/v1/objects/{app_id}/{type}/{key}` and require HMAC authentication.
+All endpoints are under `/api/v1/objects/{app_id}/{type}/{key}`. `{app_id}` may be your App Key or your app's id.
 
 ---
 
 ## Authentication
 
-Each request must be signed with your App Key and Secret:
+Every request carries your app credentials as headers (server-to-server only — never from a browser):
 
 | Header | Value |
 |---|---|
-| `X-App-Key` | Your App Key (`pk_live_...`) |
-| `X-Signature` | HMAC-SHA256 of `{timestamp}:{method}:{path}:{body_hash}` |
-| `X-Timestamp` | Unix timestamp (seconds). Requests older than 5 minutes are rejected. |
+| `X-App-Key` | Your App Key |
+| `X-App-Secret` | Your App Secret |
+| `Content-Type` | `application/json` |
 
-### Signing (Node.js)
-
-```js
-import crypto from 'crypto';
-
-function signRequest(method, path, body, secret) {
-  const timestamp  = Math.floor(Date.now() / 1000).toString();
-  const bodyHash   = crypto.createHash('sha256').update(body ?? '').digest('hex');
-  const message    = `${timestamp}:${method}:${path}:${bodyHash}`;
-  const signature  = crypto.createHmac('sha256', secret).update(message).digest('hex');
-  return { timestamp, signature };
-}
-
-const body = JSON.stringify({ value: 'shipped' });
-const { timestamp, signature } = signRequest('PUT', '/api/v1/objects/.../status', body, APP_SECRET);
+```bash
+curl https://your-host/api/v1/objects/$APP_KEY/order/order-42 \
+  -H "X-App-Key: $APP_KEY" \
+  -H "X-App-Secret: $APP_SECRET"
 ```
 
-The server SDK handles signing automatically. Use manual signing only when calling from a language without an SDK.
+The server SDK sends these headers for you.
 
 ---
 
@@ -73,8 +62,10 @@ GET /api/v1/objects/{app_id}/{type}/{key}/{slot}
 **Response:**
 
 ```json
-{ "value": "processing", "log_id": 3 }
+{ "value": "processing" }
 ```
+
+A slot that doesn't exist returns `{ "value": null }`.
 
 ---
 
@@ -121,8 +112,10 @@ Content-Type: application/json
 POST /api/v1/objects/{app_id}/{type}/{key}/increment
 Content-Type: application/json
 
-{ "slot": "retry_count", "delta": 1 }
+{ "slot": "retry_count", "by": 1 }
 ```
+
+`by` defaults to `1`. The slot is treated as `0` if it doesn't exist.
 
 **Response:**
 
@@ -168,33 +161,27 @@ DELETE /api/v1/objects/{app_id}/{type}/{key}/{slot}
 
 ### Transaction
 
-Atomic read-modify-write. The request body is an array of operations. Reads are executed first, then writes — in the order provided.
+Apply a list of ops atomically, in order — all commit or none do. The request body is a JSON array of ops:
 
 ```http
 POST /api/v1/objects/{app_id}/{type}/{key}/transaction
 Content-Type: application/json
 
-{
-  "ops": [
-    { "op": "get",    "slot": "status" },
-    { "op": "set",    "slot": "status",  "value": "shipped" },
-    { "op": "append", "slot": "history", "value": { "event": "shipped" } }
-  ]
-}
+[
+  { "op": "set",       "key": "status",      "value": "shipped" },
+  { "op": "increment", "key": "retry_count", "by": 1 },
+  { "op": "append",    "key": "history",     "value": { "event": "shipped" } },
+  { "op": "delete",    "key": "temp_lock" }
+]
 ```
 
 **Response:**
 
 ```json
-{
-  "log_id": 23,
-  "reads": {
-    "status": "processing"
-  }
-}
+{ "log_id": 23 }
 ```
 
-If you need conditional logic (e.g. only write if status == "processing"), handle it in your calling code: call `GET` first, then `POST /transaction`. For fully atomic conditional writes, use the server SDK `transaction(fn)` which runs the condition check inside the serialised GenServer.
+Ops: `set` (`key`, `value`), `delete` (`key`), `increment` (`key`, `by`), `append` (`key`, `value`). If an op cannot apply (for example `append` to a slot that is not a list) nothing commits and the response is `422`. There is no read op and no server-side condition: to write only when `status == "processing"`, read with `GET` first — the read and the write are not atomic together.
 
 ---
 
@@ -210,12 +197,18 @@ Returns all log entries with `log_id > 17`, in order.
 
 ```json
 {
-  "entries": [
-    { "log_id": 18, "op": "set",    "key": "status",  "value": "shipped" },
-    { "log_id": 19, "op": "set_all", "changes": { "status": "shipped", "shipped_at": 1718884800000 } }
+  "items": [
+    { "op": "set",    "key": "status",     "value": "shipped",     "log_id": 18 },
+    { "op": "set",    "key": "shipped_at", "value": 1718884800000, "log_id": 19 },
+    { "op": "append", "key": "events",     "item": { "type": "shipped" }, "log_id": 20 }
   ]
 }
 ```
+
+Every write op is its own entry: `setAll` and `transaction` log one `set` /
+`delete` / `append` entry per slot, with consecutive `log_id`s. `increment` is
+logged as a `set` of the new value. `append` entries carry only the appended
+`item`, not the whole list.
 
 ---
 
@@ -233,15 +226,15 @@ DELETE /api/v1/objects/{app_id}/{type}/{key}
 
 ## Error responses
 
-| Status | Meaning |
-|---|---|
-| `400` | Missing or invalid body |
-| `401` | Missing or invalid signature / timestamp expired |
-| `403` | App disabled or key mismatch |
-| `404` | Slot not found (on GET slot) |
-| `409` | Transaction conflict (retry) |
-| `422` | Validation error (e.g. increment on non-numeric slot) |
+Error bodies are JSON with a stable `error` code, never an internal term.
 
-```json
-{ "error": "slot not found", "slot": "temp_lock" }
-```
+| Status | Body | Meaning |
+|---|---|---|
+| `400` | `{ "error": "<code>" }` | malformed body or query (e.g. a missing `value`, a non-integer `by` or `after`) |
+| `401` | `{ "errors": [{ "status": "401", "title": "Unauthorized" }] }` | bad / missing headers, or the path `app_id` isn't the authenticated app |
+| `422` | `{ "error": "not_a_number" \| "not_a_list", "slot": "<slot>" }` or `{ "error": "invalid_transaction_operation", "operation": {...} }` | the data rejected the write; retrying it unchanged fails again |
+| `503` | `{ "error": "<code>" }` | storage unavailable (e.g. `insufficient_replicas`). A read or purge, or a write that failed before any replica was written: it did not commit, retry it |
+| `500` | `{ "error": "write_outcome_unknown", "cause": "<code>" }` | a write failed while replicas were being written (e.g. `write_quorum`, a timeout): it may have committed. Don't retry a non-idempotent write blindly; read the object to check |
+
+The server SDKs retry a `503` on any request; they never retry a `POST` on
+`500` (`write_outcome_unknown`).

@@ -424,10 +424,14 @@ messages = chat.list_messages(thread["id"])
 chat.edit_message(thread["id"], messages[0]["id"], content={"text": "Hello, updated"})
 chat.delete_message(thread["id"], messages[0]["id"])
 
-# Thread lifecycle
+# Thread lifecycle (archive last: an archived thread rejects every change)
+chat.handoff_thread(thread["id"], assigned_agent="agent_99")  # -> pending
+chat.activate_thread(thread["id"])                            # -> active
+chat.mark_thread_pending(thread["id"])                        # -> pending
+chat.resolve_thread(thread["id"])                             # -> resolved
+chat.reopen_thread(thread["id"])                              # -> open
 chat.resolve_thread(thread["id"])
 chat.archive_thread(thread["id"])
-chat.handoff_thread(thread["id"], assigned_agent="agent_99")
 ```
 
 Use as a context manager to ensure the HTTP client is closed:

@@ -179,4 +179,4 @@ if (history.has_older) {
 - [Client SDK](../reference/client-sdk) — full API reference for `PingerchipsChat` and `ChatSession`
 - [Agent SDK](../reference/agent-sdk) — full API reference for `AgentSession` and `Run`
 - [Auth](../cookbook/auth) — HMAC token flow in detail
-- [Architecture](../reference/architecture) — WAL, `set_volatile`, GC, archival internals
+- [Architecture](../reference/architecture) — WAL, token streaming, run compaction, archival internals

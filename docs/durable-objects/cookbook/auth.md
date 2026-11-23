@@ -8,26 +8,21 @@ Durable Objects use two auth models depending on the caller:
 
 | Caller | Auth model |
 |---|---|
-| Server SDK / HTTP API | HMAC with App Key + App Secret |
-| Client SDK (browser) | Per-object HMAC token, issued by your server |
+| Server SDK / HTTP API | App Key + App Secret headers |
+| Client SDK (browser) | Per-object capability token (HMAC-signed), issued by your server |
 
 ---
 
 ## Server auth (App Secret)
 
-Server-side calls are authenticated by signing each request with your App Secret. The server SDK handles this automatically.
-
-The HTTP API uses three headers:
+Server-side calls send your App Key and App Secret as headers over HTTPS. The server SDK handles this automatically.
 
 ```http
 X-App-Key:    pk_live_...
-X-Signature:  {hmac_sha256_of_request}
-X-Timestamp:  {unix_seconds}
+X-App-Secret: {appSecret}
 ```
 
-The signature covers: `{timestamp}:{METHOD}:{path}:{sha256_body_hash}`.
-
-Requests with a timestamp more than 5 minutes old are rejected to prevent replay attacks.
+The secret is compared in constant time. Because it travels with every request, only call the HTTP API from your own servers, over TLS.
 
 ---
 
@@ -49,7 +44,7 @@ Your Server
    ▼
 Your Server
    │
-   │  4. { auth: "appKey:hmac_signature" }
+   │  4. { auth: "{appKey}.{payloadB64}.{sigB64}" }
    ▼
 Client (browser)
    │
@@ -75,13 +70,11 @@ app.post('/auth/durable', (req, res) => {
 });
 ```
 
-`authenticateObject` returns `{ auth: "pk_live_...:hmac_signature" }`.
+`authenticateObject` returns `{ auth: "{appKey}.{payloadB64}.{sigB64}" }`.
 
 ### What is signed
 
-```
-{socketId}:durable:v1:app:{appKey}:{objectType}:{objectKey}
-```
+The payload is `{ "socket_id": socketId, "capabilities": ["object:read:{objectType}/{objectKey}"] }`, base64url-encoded; the signature is HMAC-SHA256 over `{appKey}.{payloadB64}` with your App Secret.
 
 The token is bound to the specific socket connection, app, object type, and object key. A token for `order/order-42` cannot be used to subscribe to `order/order-99`.
 

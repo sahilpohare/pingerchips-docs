@@ -74,17 +74,19 @@ This is a synchronous read of the locally cached state — no network call.
 Fires on every single-slot write. Also fires for each slot in a batch write.
 
 ```js
-order.on('change', ({ key, value, previous, logId }) => {
-  console.log(`${key}: ${previous} → ${value} (log ${logId})`);
+order.on('change', ({ key, value, previous, log_id }) => {
+  console.log(`${key}: ${previous} → ${value} (log ${log_id})`);
 });
 ```
+
+An `append` to a list slot carries only the new item: `{ key, op: 'append', item, log_id }`, with no `value` or `previous`. `order.state` already holds the full updated list — read it with `order.get(key)`. `value: null` means the slot was deleted.
 
 ### `order.on('change:STATUS', handler)`
 
 Slot-specific listener. Only fires when `status` changes.
 
 ```js
-order.on('change:status', ({ value, previous, logId }) => {
+order.on('change:status', ({ value, previous, log_id }) => {
   updateStatusBadge(value);
 });
 ```
@@ -93,22 +95,22 @@ You can have multiple listeners for the same event.
 
 ### `order.on('batch', handler)`
 
-Fires when a `setAll` or `transaction` updates multiple slots atomically. Receives the full array of changes and the shared `logId`.
+Fires when a `setAll` or `transaction` updates multiple slots atomically. Receives the full array of changes and the shared `log_id`.
 
 ```js
-order.on('batch', ({ changes, logId }) => {
-  for (const { key, value, previous } of changes) {
-    applyChange(key, value);
+order.on('batch', ({ changes, log_id }) => {
+  for (const change of changes) {
+    applyChange(change); // { key, value, previous } or { key, op: 'append', item }
   }
 });
 ```
 
 ### `order.on('snapshot', handler)`
 
-Fires on initial join and on reconnect. Receives the full state and the current `logId`.
+Fires on initial join and on reconnect. Receives the full state and the current `log_id`.
 
 ```js
-order.on('snapshot', ({ state, logId }) => {
+order.on('snapshot', ({ state, log_id }) => {
   hydrate(state);
 });
 ```
@@ -132,7 +134,7 @@ After `unsubscribe()`, no further events are emitted and the WebSocket channel i
 
 ## Resumable subscribe pattern
 
-Save the latest `logId` to local storage so reconnects never miss changes:
+Save the latest `log_id` to local storage so reconnects never miss changes:
 
 ```js
 const CHECKPOINT_KEY = 'order-42-log-id';
@@ -141,14 +143,14 @@ const order = await pc.object('order', 'order-42', {
   afterLogId: Number(localStorage.getItem(CHECKPOINT_KEY)) || undefined,
 });
 
-order.on('change', ({ key, value, logId }) => {
-  applyChange(key, value);
-  localStorage.setItem(CHECKPOINT_KEY, logId);
+order.on('change', (change) => {
+  applyChange(change); // handle op === 'append' by pushing change.item
+  localStorage.setItem(CHECKPOINT_KEY, change.log_id);
 });
 
-order.on('batch', ({ changes, logId }) => {
-  for (const c of changes) applyChange(c.key, c.value);
-  localStorage.setItem(CHECKPOINT_KEY, logId);
+order.on('batch', ({ changes, log_id }) => {
+  for (const c of changes) applyChange(c);
+  localStorage.setItem(CHECKPOINT_KEY, log_id);
 });
 ```
 

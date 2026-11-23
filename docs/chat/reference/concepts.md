@@ -16,6 +16,7 @@ A thread is the top-level container for a conversation.
 | `title` | string? | Optional display title |
 | `bot_id` | UUID? | Agent assigned to this thread |
 | `assigned_agent` | string? | Human agent handle (post-handoff) |
+| `archived_at` | timestamp? | Set by `archive`; an archived thread takes no further changes |
 | `metadata` | map | Arbitrary key-value pairs |
 
 Thread state is stored in the Durable Objects ring and replicated to Postgres. Subscribe via:
@@ -26,15 +27,37 @@ chat:v1:app:{appKey}:thread:{threadId}
 
 ### Thread status flow
 
+`status` and `archived_at` change only through lifecycle actions — the generic thread update does not accept them. Each action is its own REST route (`PATCH /api/chat/threads/{id}/{action}`):
+
+| Action | Route | From | To |
+|---|---|---|---|
+| `assign_bot` | `/assign-bot` | `open` · `bot` · `pending` · `active` | `bot` |
+| `handoff` | `/handoff` | `open` · `bot` · `pending` · `active` | `pending` |
+| `mark_pending` | `/mark-pending` | `open` · `bot` · `active` | `pending` |
+| `activate` | `/activate` | `open` · `bot` · `pending` · `active` (no-op) | `active` |
+| `resolve` | `/resolve` | `open` · `bot` · `pending` · `active` | `resolved` |
+| `reopen` | `/reopen` | `resolved` | `open` |
+| `archive` | `/archive` | any status | sets `archived_at`, status kept |
+
+Any other transition (e.g. `activate` on a resolved thread, `reopen` on an open one) is rejected with a `4xx` error. Once a thread is archived, every action — including a plain update — is rejected.
+
 ```mermaid
 stateDiagram-v2
     [*] --> open : thread created
-    open --> bot : bot assigned
-    bot --> pending : bot hands off
-    pending --> active : human agent picks up
-    active --> resolved : conversation closed
-    resolved --> open : reopened
-    open --> resolved : directly resolved
+    open --> bot : assign_bot
+    open --> pending : handoff / mark_pending
+    open --> active : activate
+    bot --> pending : handoff / mark_pending
+    bot --> active : activate
+    pending --> bot : assign_bot
+    pending --> active : activate
+    active --> bot : assign_bot
+    active --> pending : handoff / mark_pending
+    open --> resolved : resolve
+    bot --> resolved : resolve
+    pending --> resolved : resolve
+    active --> resolved : resolve
+    resolved --> open : reopen
 ```
 
 ---
@@ -61,18 +84,27 @@ A run is one LLM generation cycle.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> running : run:start
-    running --> running : run:token ×N\n(buffered 40ms)
-    running --> done : run:end\nmessage committed
-    running --> suspended : run:suspend\nawaiting tool approval
-    suspended --> running : run:resume
-    suspended --> cancelled : cancel
-    running --> cancelled : cancel
-    done --> [*]
+    [*] --> pending : send\n(user message)
+    [*] --> active : run:start
+    pending --> active : run:start
+    active --> active : run:token ×N\n(buffered 40ms)
+    active --> suspended : run:suspend\nawaiting tool approval
+    suspended --> active : run:resume
+    active --> complete : run:end
+    active --> error : run:end (error)
+    suspended --> complete : run:end
+    suspended --> error : run:end (error)
+    pending --> cancelled : cancel / agent timeout
+    active --> cancelled : cancel / run:end / agent timeout
+    suspended --> cancelled : cancel / run:end / approval timeout
+    complete --> [*]
     cancelled --> [*]
+    error --> [*]
 ```
 
-During streaming, token chunks are buffered in a `TokenBuffer` GenServer and flushed every 40ms to the WAL as a `stream:{runId}` volatile slot. On `run:end` the final message is appended to `messages` and the volatile slot is dropped.
+A suspended run waits for a human's tool approval, so the agent timeout does not apply to it; it has its own, much longer approval timeout instead. Every ending — `run:end`, `cancel`, either timeout — takes the same path and emits the same `run:end` + `batch` events.
+
+During streaming, token chunks are buffered in a `TokenBuffer` GenServer and flushed every 40ms into the `stream:{runId}` slot. When the run ends the final message is appended to `messages` and the stream slot is deleted.
 
 ---
 
@@ -100,20 +132,20 @@ When a user regenerates, the server creates a new assistant message with `fork_o
 
 ---
 
-## GC compaction
+## Run compaction
 
-The WAL grows with every write. Chat compacts on every `run:end`:
+Every run ending folds its stream into one message, in one atomic transaction:
 
 ```mermaid
 graph LR
-    RE[run:end] --> R[Read messages from WAL]
-    R --> W[set_all: messages ++ new_message\n+ drop stream slot]
-    W --> C[Compaction baseline reset]
+    RE[run ends] --> F[Flush buffered tokens]
+    F --> TX["transaction:\nappend messages ← final message\nset run:{runId} status\ndelete stream:{runId}\nset last_message_id"]
+    TX --> B[batch event, one log_id]
 
-    style C fill:#f0fdf4,stroke:#16a34a
+    style B fill:#f0fdf4,stroke:#16a34a
 ```
 
-`set_all` is atomic — all preceding log entries for `messages` can be trimmed safely.
+The message is logged as an item-only `append` entry, so a run's cost on disk does not grow with the thread's length. Subscribers receive `{ key: "messages", op: "append", item }` inside the `batch` and push `item` onto their local list.
 
 ---
 
